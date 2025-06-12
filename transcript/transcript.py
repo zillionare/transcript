@@ -19,23 +19,22 @@ a: 这个命令能按关键帧分割： ffmpeg -i raw.mp4 -c copy -map 0 -segmen
 """
 
 import datetime
-from multiprocessing.util import is_exiting
-import sys
+import json
 import os
 import shlex
 import shutil
 import subprocess
+import sys
 import warnings
+from multiprocessing.util import is_exiting
+from pathlib import Path
 from subprocess import PIPE, STDOUT, Popen
 from typing import Any, List, Tuple
-import json
-
 
 import fire
 import jieba
 import opencc
 import pysubs2
-from pathlib import Path
 
 # from pywhispercpp.model import Model
 
@@ -251,7 +250,7 @@ def transcript_cpp(input_audio: Path, output_srt: Path, prompt: str, dry_run=Fal
 
 def init_jieba():
     custom_map = {}
-    dict_path = os.path.join(os.path.dirname(__file__), "words.md")
+    dict_path = Path(__file__).parent.parent / "words.md"
     with open(dict_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -286,7 +285,7 @@ def transcriptx(input_audio: Path, output_srt: Path, prompt: str):
     )
 
     subs = pysubs2.load_from_whisper(result["segments"])
-    subs.save(output_srt)
+    subs.save(str(output_srt))
     # 2. Align whisper output
     # model_a, metadata = whisperx.load_align_model(
     #     language_code=result["language"], device=device, model_name = w2v_model
@@ -326,7 +325,7 @@ def transcript(input_video: Path, output_dir: Path = None, dry_run=False):
 
     Args:
         input_video: 输入视频文件路径
-        output_dir: 输出目录，如果为None则使用默认目录
+        output_dir: 输出目录，如果为None则将srt文件保存到项目根目录
         dry_run: 是否为试运行模式
     """
     input_video = Path(input_video)
@@ -343,34 +342,44 @@ def transcript(input_video: Path, output_dir: Path = None, dry_run=False):
     # 使用视频文件名（不含扩展名）作为项目名称
     name = input_video.stem
 
-    # 设置输出目录
-    if output_dir is None:
-        output_dir = Path("/tmp/transcript") / name
-    else:
-        output_dir = Path(output_dir)
+    # 设置工作目录（用于临时文件）
+    working_dir = Path("/tmp/transcript") / name
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # 设置最终srt文件的输出目录
+    if output_dir is None:
+        # 获取项目根目录（transcript.py所在目录的上级目录）
+        script_dir = Path(__file__).parent
+        project_root = script_dir.parent
+        final_output_dir = project_root
+    else:
+        final_output_dir = Path(output_dir)
+
+    working_dir.mkdir(parents=True, exist_ok=True)
 
     # 保存工作日志
-    log_file = output_dir / ".log"
+    log_file = "/tmp/transcript.log"
     with open(log_file, "w", encoding="utf-8") as f:
         json.dump({
-            "working_dir": str(output_dir),
+            "working_dir": str(working_dir),
             "name": name,
             "raw_video": str(input_video),
             "timestamp": datetime.datetime.now().isoformat()
             }, f, indent=2)
 
     # 复制视频到工作目录
-    video = output_dir / input_video.name
+    video = working_dir / input_video.name
     if not video.exists():
         print(f"复制视频文件到工作目录: {input_video} -> {video}")
         shutil.copy(input_video, video)
 
-    # 设置输出文件路径
-    output_srt = output_dir / f"{name}.srt"
+    # 设置临时srt文件路径（在工作目录中）
+    temp_srt = working_dir / f"{name}.srt"
     output_wav = video.with_suffix(".wav")
-    print(f"开始转换视频为字幕: {input_video} -> {output_srt}")
+
+    # 设置最终srt文件路径（在项目根目录中）
+    final_srt = final_output_dir / f"{name}.srt"
+
+    print(f"开始转换视频为字幕: {input_video} -> {final_srt}")
 
     # 提取音频
     start = datetime.datetime.now()
@@ -380,19 +389,23 @@ def transcript(input_video: Path, output_dir: Path = None, dry_run=False):
         print("提取音频...")
         extract_audio(video, output_wav)
 
-    # 生成字幕
+    # 生成字幕到临时位置
     print("生成字幕...")
-    transcript_cpp(output_wav, output_srt, prompt, dry_run)
+    transcript_cpp(output_wav, temp_srt, prompt, dry_run)
 
     # 应用自定义词典纠错
     print("应用词典纠错...")
-    sub(output_srt)
+    sub(temp_srt)
+
+    # 复制字幕文件到项目根目录
+    print(f"复制字幕文件到项目根目录: {temp_srt} -> {final_srt}")
+    shutil.copy2(temp_srt, final_srt)
 
     cost(start, prefix="字幕生成完成 ")
-    print(f"字幕文件已保存到: {output_srt}")
-    print(f"工作目录: {output_dir}")
+    print(f"字幕文件已保存到: {final_srt}")
+    print(f"工作目录: {working_dir}")
 
-    return output_srt, output_dir
+    return final_srt
 
 
 def probe_duration(video):
@@ -469,7 +482,7 @@ def sub(srt_file: Path):
     subs.save(str(srt_file))
 
 
-def cut(working_dir: Path = None):
+def cut():
     """字幕编辑之后，进行视频切分、合并、压字幕、压缩及拷贝
 
     1. 剪掉语助（单行的好，呃等）
@@ -477,21 +490,12 @@ def cut(working_dir: Path = None):
     3. 根据自定义词典完成替换
 
     Args:
-        working_dir: 工作目录，如果为None则从.log文件读取
+        working_dir: 工作目录，如果为None则从/tmp/transcript.log文件读取
     """
     # 读取工作日志
-    if working_dir is None:
-        log_file = Path(".log")
-        if not log_file.exists():
-            # 尝试在当前目录查找最新的工作目录
-            possible_dirs = list(Path("/tmp/transcript").glob("*/.log"))
-            if possible_dirs:
-                log_file = max(possible_dirs, key=lambda x: x.stat().st_mtime)
-                print(f"使用最新的工作目录: {log_file.parent}")
-            else:
-                raise FileNotFoundError("找不到工作日志文件，请先运行transcript命令")
-    else:
-        log_file = Path(working_dir) / ".log"
+    log_file = Path("/tmp/transcript.log")
+    if not log_file.exists():
+        raise FileNotFoundError("找不到工作日志文件，请先运行transcript命令")
 
     with open(log_file, "r", encoding="utf-8") as f:
         log = json.load(f)
@@ -605,12 +609,12 @@ def adjust_subtitles_offset(srt: Path, opening_video: Path, full_srt: Path):
 
     subs.save(str(full_srt))
 
-def merge(working_dir: Path = None, output_path: Path = None,
+def merge(output_path: Path = None,
           opening_video_path: Path = None, ending_video_path: Path = None):
     """合并剪辑片段、片头、片尾以及压缩
 
     Args:
-        working_dir: 工作目录，如果为None则从.log文件读取
+        working_dir: 工作目录，如果为None则从/tmp/transcript.log文件读取
         output_path: 输出路径，如果为None则使用原视频位置
         opening_video_path: 片头视频路径
         ending_video_path: 片尾视频路径
@@ -618,16 +622,10 @@ def merge(working_dir: Path = None, output_path: Path = None,
     这一步之后，所有的字幕及剪辑都应该正确完成了
     """
     # 读取工作日志
-    if working_dir is None:
-        log_file = Path(".log")
-        if not log_file.exists():
-            possible_dirs = list(Path("/tmp/transcript").glob("*/.log"))
-            if possible_dirs:
-                log_file = max(possible_dirs, key=lambda x: x.stat().st_mtime)
-            else:
-                raise FileNotFoundError("找不到工作日志文件")
-    else:
-        log_file = Path(working_dir) / ".log"
+    log_file = Path("/tmp/transcript.log")
+    if not log_file.exists():
+        raise FileNotFoundError("找不到工作日志文件")
+
 
     log = json.load(open(log_file, "r", encoding="utf-8"))
     working_dir = Path(log["working_dir"])
@@ -776,7 +774,7 @@ def process_video(input_video: str, output_path: str = None,
 
         # 步骤1: 生成字幕
         print("\n步骤1: 生成字幕")
-        srt_file, working_dir = transcript(input_video)
+        srt_file = transcript(input_video)
 
         if not auto_process:
             print(f"\n请编辑字幕文件: {srt_file}")
@@ -787,12 +785,11 @@ def process_video(input_video: str, output_path: str = None,
 
         # 步骤2: 剪辑视频
         print("\n步骤2: 剪辑视频")
-        working_dir = cut(working_dir)
+        cut()
 
         # 步骤3: 合并和输出
         print("\n步骤3: 合并和输出")
         final_with_sub, final_no_sub, final_srt = merge(
-            working_dir=working_dir,
             output_path=Path(output_path) if output_path else None,
             opening_video_path=Path(opening_video) if opening_video else None,
             ending_video_path=Path(ending_video) if ending_video else None

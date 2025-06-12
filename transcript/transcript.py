@@ -249,20 +249,63 @@ def transcript_cpp(input_audio: Path, output_srt: Path, prompt: str, dry_run=Fal
 
 
 def init_jieba():
-    custom_map = {}
-    dict_path = Path(__file__).parent.parent / "dict.md"
-    with open(dict_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("#") or len(line) == 0:
-                continue
-            wrong, right = line.split(",")
-            custom_map[wrong] = right
+    """
+    初始化jieba分词器并加载自定义词典
 
-    for word in custom_map.keys():
+    Returns:
+        tuple: (replace_map, warning_words) - 替换词典和警告词列表
+    """
+    import yaml
+
+    replace_map = {}
+    warning_words = []
+
+    # 尝试加载YAML格式的字典文件
+    dict_path = Path(__file__).parent.parent / "dict.yaml"
+
+    if dict_path.exists():
+        try:
+            with open(dict_path, "r", encoding="utf-8") as f:
+                dict_data = yaml.safe_load(f)
+
+            # 加载替换词典
+            if "replace" in dict_data and dict_data["replace"]:
+                replace_map = dict_data["replace"]
+                print(f"📚 加载替换词典: {len(replace_map)} 个词汇")
+
+            # 加载警告词列表
+            if "warning" in dict_data and dict_data["warning"]:
+                warning_words = dict_data["warning"]
+                print(f"⚠️  加载警告词列表: {len(warning_words)} 个词汇")
+
+        except Exception as e:
+            print(f"❌ 加载YAML字典失败: {e}")
+            print("尝试加载旧格式字典...")
+
+            # 回退到旧格式
+            old_dict_path = Path(__file__).parent.parent / "words.md"
+            if old_dict_path.exists():
+                with open(old_dict_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("#") or len(line) == 0:
+                            continue
+                        parts = line.split(",")
+                        if len(parts) >= 2:
+                            wrong, right = parts[0], parts[1]
+                            replace_map[wrong] = right
+                print(f"📚 从旧格式加载: {len(replace_map)} 个词汇")
+    else:
+        print(f"⚠️  字典文件不存在: {dict_path}")
+
+    # 将所有词汇添加到jieba词典
+    for word in replace_map.keys():
         jieba.add_word(word)
 
-    return custom_map
+    for word in warning_words:
+        jieba.add_word(word)
+
+    return replace_map, warning_words
 
 
 def transcriptx(input_audio: Path, output_srt: Path, prompt: str):
@@ -470,16 +513,40 @@ def sub(srt_file: Path):
     """
     subs = pysubs2.load(str(srt_file))
 
-    custom_map = init_jieba()
-    for event in subs.events:
+    replace_map, warning_words = init_jieba()
+    warnings_found = []
+
+    for i, event in enumerate(subs.events):
         text = event.text
 
-        replaced = "".join([custom_map.get(x, x) for x in jieba.cut(text)])
+        # 先应用替换词典
+        replaced = "".join([replace_map.get(x, x) for x in jieba.cut(text)])
         if event.text != replaced:
-            print(f"{event.text} -> {replaced}")
+            print(f"🔄 词典替换: {event.text} -> {replaced}")
         event.text = replaced
 
+        # 对替换后的内容检查警告词
+        for word in warning_words:
+            if word in event.text:
+                warnings_found.append({
+                    'word': word,
+                    'text': event.text,
+                    'index': i + 1
+                })
+
     subs.save(str(srt_file))
+
+    # 集中输出警告信息
+    if warnings_found:
+        print(f"\n{'='*60}")
+        print(f"⚠️  发现 {len(warnings_found)} 个需要人工复检的字幕")
+        print(f"{'='*60}")
+        for warning in warnings_found:
+            print(f"字幕 {warning['index']}: 发现词汇 '{warning['word']}'")
+            print(f"内容: {warning['text']}")
+            print("-" * 40)
+        print(f"请检查以上字幕内容是否需要手动调整")
+        print(f"{'='*60}\n")
 
 
 def cut():
@@ -533,7 +600,7 @@ def cut():
 
     out_srt = parent / "cut.srt"
 
-    custom_map = init_jieba()
+    replace_map, warning_words = init_jieba()
     markers = "好呃恩嗯"
 
     to_del = []
@@ -569,11 +636,17 @@ def cut():
             print(f"删除标记字幕: {event.text}")
             continue
 
-        replaced = "".join([custom_map.get(x, x) for x in jieba.cut(text)])
+        # 先应用替换词典
+        replaced = "".join([replace_map.get(x, x) for x in jieba.cut(text)])
         if event.text != replaced:
-            print(f"词典纠错: {event.text} -> {replaced}")
+            print(f"🔄 词典替换: {event.text} -> {replaced}")
 
         event.text = replaced
+
+        # 对替换后的内容检查警告词（在cut阶段不集中输出，因为可能有删除）
+        for word in warning_words:
+            if word in event.text:
+                print(f"⚠️  警告: 字幕中发现需要人工复检的词汇 '{word}': {event.text}")
         event.start -= cum_lag
         event.end -= cum_lag
         keep_subs.events.append(event)

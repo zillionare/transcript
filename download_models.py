@@ -22,7 +22,7 @@ def download_align_model():
     model_name = "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn"
     
     # 使用与 transcript.py 相同的模型目录
-    model_dir = os.environ.get("hf_model_dir", "/Volumes/share/data/hf_models")
+    model_dir = os.environ.get("hf_model_dir", "/Volumes/share/data/models/huggingface/hub")
     model_dir = Path(model_dir)
     model_dir.mkdir(parents=True, exist_ok=True)
     
@@ -56,7 +56,7 @@ def download_align_model():
 
 def check_model_exists():
     """检查模型是否已存在"""
-    model_dir = os.environ.get("hf_model_dir", "/Volumes/share/data/hf_models")
+    model_dir = os.environ.get("hf_model_dir", "/Volumes/share/data/models/huggingface/hub")
     model_path = Path(model_dir) / "models--jonatasgrosman--wav2vec2-large-xlsr-53-chinese-zh-cn"
     
     if model_path.exists():

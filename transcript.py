@@ -54,99 +54,154 @@ cpp_model = Path("/Volumes/share/data/whisper.cpp/models/ggml-large-v2.bin")
 # 设置本地模型目录，如果环境变量未设置则使用默认路径
 model_dir = os.environ.get("hf_model_dir", "/Volumes/share/data/models/huggingface/hub")
 
+# 设置whisperx模型名称
+whisperx_model = "large-v2"  # 支持中文的whisper模型
+w2v_model = "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn"  # 中文对齐模型
+
 def align_subtitles_with_audio(video: Path, original_srt: Path, aligned_srt: Path):
     """
     使用 whisperx 对齐字幕文件与音频。
-    如果对齐模型不可用，则直接复制原始字幕文件。
+    这是确保剪辑后视频与字幕同步的关键步骤。
 
     Args:
-        video (str): 合并后的视频文件路径。
-        original_srt (str): 原始字幕文件路径。
-        aligned_srt (str): 对齐后的字幕文件路径。
+        video: 合并后的视频文件路径
+        original_srt: 原始字幕文件路径
+        aligned_srt: 对齐后的字幕文件路径
     """
+    print(f"开始字幕对齐: {original_srt} -> {aligned_srt}")
+
     try:
+        # 验证输入文件
+        if not Path(video).exists():
+            raise FileNotFoundError(f"视频文件不存在: {video}")
+        if not Path(original_srt).exists():
+            raise FileNotFoundError(f"字幕文件不存在: {original_srt}")
+
         # 提取音频
         audio_path = Path(video).with_suffix(".wav")
-        extract_audio(video, audio_path)
+        if not audio_path.exists():
+            print("提取音频文件...")
+            extract_audio(video, audio_path)
 
-        device = "cpu"
+        # 设置设备 - Mac ARM优化
+        import platform
+        if platform.system() == "Darwin" and platform.machine() == "arm64":
+            # Mac ARM架构，使用CPU
+            device = "cpu"
+            print("检测到Mac ARM架构，使用CPU进行对齐")
+        else:
+            device = "cpu"  # 保持兼容性
 
+        print("加载音频...")
         audio = whisperx.load_audio(str(audio_path))
-        # 加载字幕文件
-        subs = pysubs2.load(str(original_srt))
-        segments = [
-            {
-                "start": event.start / 1000,
-                "end": event.end / 1000,
-                "text": event.text,
-                "id": i
-             }
-               for i, event in enumerate(subs.events)]
 
-        # 加载对齐模型
-        print("Loading align model...")
+        # 加载字幕文件
+        print("加载字幕文件...")
+        subs = pysubs2.load(str(original_srt))
+
+        if not subs.events:
+            print("警告: 字幕文件为空")
+            shutil.copy2(original_srt, aligned_srt)
+            return
+
+        segments = []
+        for i, event in enumerate(subs.events):
+            if event.text.strip():  # 跳过空字幕
+                segments.append({
+                    "start": event.start / 1000,
+                    "end": event.end / 1000,
+                    "text": event.text.strip(),
+                    "id": i
+                })
+
+        if not segments:
+            print("警告: 没有有效的字幕段落")
+            shutil.copy2(original_srt, aligned_srt)
+            return
 
         # 设置离线模式环境变量
         import os
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         os.environ["HF_HUB_OFFLINE"] = "1"
 
+        # 加载对齐模型
+        print("加载对齐模型...")
+        model_name = None
+
         # 尝试使用本地路径
         local_model_path = Path(model_dir) / "models--jonatasgrosman--wav2vec2-large-xlsr-53-chinese-zh-cn"
         if local_model_path.exists():
-            # 查找最新的快照目录
             snapshots_dir = local_model_path / "snapshots"
             if snapshots_dir.exists():
                 snapshot_dirs = [d for d in snapshots_dir.iterdir() if d.is_dir()]
                 if snapshot_dirs:
                     latest_snapshot = max(snapshot_dirs, key=lambda x: x.stat().st_mtime)
-                    print(f"Using local model from: {latest_snapshot}")
+                    print(f"使用本地模型: {latest_snapshot}")
                     model_name = str(latest_snapshot)
-                else:
-                    model_name = "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn"
-            else:
-                model_name = "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn"
-        else:
-            model_name = "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn"
 
-        model_a, metadata = whisperx.load_align_model(
-            language_code="zh",
-            device=device,
-            model_name=model_name,
-            model_dir=model_dir
-        )
-        print("Align model loaded. Alignment in progress...")
+        if model_name is None:
+            model_name = w2v_model
+            print(f"使用默认模型名称: {model_name}")
 
-        # 对齐字幕
+        try:
+            model_a, metadata = whisperx.load_align_model(
+                language_code="zh",
+                device=device,
+                model_name=model_name,
+                model_dir=model_dir
+            )
+            print("对齐模型加载成功，开始对齐...")
+        except Exception as model_error:
+            print(f"模型加载失败: {model_error}")
+            raise
+
+        # 执行对齐
+        print(f"对齐 {len(segments)} 个字幕段落...")
         aligned_result = whisperx.align(segments, model_a, metadata, audio, device)
 
-        # 更新字幕时间戳
+        if "segments" not in aligned_result or not aligned_result["segments"]:
+            print("警告: 对齐结果为空")
+            shutil.copy2(original_srt, aligned_srt)
+            return
+
+        # 创建对齐后的字幕
         aligned_subs = pysubs2.SSAFile()
+
         for i, segment in enumerate(aligned_result["segments"]):
-            event = pysubs2.SSAEvent()
-            event.start = int(segment["start"] * 1000)  # 转换为毫秒
-            end = int(segment["end"] * 1000)
-            if i < len(aligned_result["segments"]) - 1:
-                 next_start = int(aligned_result["segments"][i + 1]["start"] * 1000)
-                 event.end = max(next_start - 500, end)
-            else:
-                event.end = end
-            event.text = segment["text"]
-            aligned_subs.events.append(event)
+            if "start" in segment and "end" in segment and "text" in segment:
+                event = pysubs2.SSAEvent()
+                event.start = int(segment["start"] * 1000)  # 转换为毫秒
+                event.end = int(segment["end"] * 1000)
+                event.text = segment["text"]
+
+                # 确保时间戳合理
+                if event.end <= event.start:
+                    event.end = event.start + 1000  # 至少1秒
+
+                # 避免重叠
+                if i > 0 and event.start < aligned_subs.events[-1].end:
+                    event.start = aligned_subs.events[-1].end + 100
+                    if event.end <= event.start:
+                        event.end = event.start + 1000
+
+                aligned_subs.events.append(event)
 
         # 保存对齐后的字幕文件
         aligned_subs.save(str(aligned_srt))
-        print(f"字幕已对齐并保存到 {aligned_srt}")
+        print(f"✅ 字幕对齐完成: {len(aligned_subs.events)} 个段落")
+        print(f"对齐结果保存到: {aligned_srt}")
 
     except Exception as e:
-        print(f"对齐模型加载失败: {e}")
-        print("使用原始字幕文件作为对齐结果...")
+        print(f"❌ 字幕对齐失败: {e}")
+        print("使用原始字幕文件作为备选方案...")
 
         # 直接复制原始字幕文件
-        import shutil
         shutil.copy2(original_srt, aligned_srt)
-        print(f"已复制原始字幕到 {aligned_srt}")
-        print("提示: 要使用字幕对齐功能，请运行 'python download_models.py' 下载对齐模型")
+        print(f"已复制原始字幕到: {aligned_srt}")
+        print("💡 提示: 要使用字幕对齐功能，请确保:")
+        print("   1. 运行 'python download_models.py' 下载对齐模型")
+        print("   2. 检查模型文件是否完整")
+        print("   3. 确保网络连接正常（首次下载时）")
 
 
 def execute(cmd, dry_run=False, supress_log=False, msg: str = ""):
@@ -265,35 +320,79 @@ def cost(start, cmd: str = "", prefix=""):
     )
 
 
-def transcript(input_video: Path, dry_run=False):
-    input_video = Path(input_video)
-    assert input_video.name == "raw.mp4"
+def transcript(input_video: Path, output_dir: Path = None, dry_run=False):
+    """
+    将视频转换为字幕文件
 
-    name = input_video.parent.name
-    output_dir = Path("/tmp/transcript") / name 
+    Args:
+        input_video: 输入视频文件路径
+        output_dir: 输出目录，如果为None则使用默认目录
+        dry_run: 是否为试运行模式
+    """
+    input_video = Path(input_video)
+
+    # 验证输入文件存在
+    if not input_video.exists():
+        raise FileNotFoundError(f"输入视频文件不存在: {input_video}")
+
+    # 验证文件格式
+    valid_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv'}
+    if input_video.suffix.lower() not in valid_extensions:
+        raise ValueError(f"不支持的视频格式: {input_video.suffix}")
+
+    # 使用视频文件名（不含扩展名）作为项目名称
+    name = input_video.stem
+
+    # 设置输出目录
+    if output_dir is None:
+        output_dir = Path("/tmp/transcript") / name
+    else:
+        output_dir = Path(output_dir)
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    with open(".log", "w", encoding="utf-8") as f:
+    # 保存工作日志
+    log_file = output_dir / ".log"
+    with open(log_file, "w", encoding="utf-8") as f:
         json.dump({
-            "working_dir": str(output_dir), 
+            "working_dir": str(output_dir),
             "name": name,
-            "raw_video": str(input_video)
-            }, f)
+            "raw_video": str(input_video),
+            "timestamp": datetime.datetime.now().isoformat()
+            }, f, indent=2)
 
+    # 复制视频到工作目录
     video = output_dir / input_video.name
-    shutil.copy(input_video, video)
+    if not video.exists():
+        print(f"复制视频文件到工作目录: {input_video} -> {video}")
+        shutil.copy(input_video, video)
 
-    output_srt = (Path(".") / input_video.parent.name).with_suffix(".srt").resolve()
+    # 设置输出文件路径
+    output_srt = output_dir / f"{name}.srt"
     output_wav = video.with_suffix(".wav")
-    print(f"convert video to subtitles: {input_video} > {output_srt}")
+    print(f"开始转换视频为字幕: {input_video} -> {output_srt}")
 
-    # convert video to wav
+    # 提取音频
     start = datetime.datetime.now()
-    print(f"{start.hour}:{start.minute}:{start.second}: started")
-    extract_audio(input_video, output_wav)
+    print(f"{start.hour:02d}:{start.minute:02d}:{start.second:02d}: 开始处理")
 
+    if not output_wav.exists():
+        print("提取音频...")
+        extract_audio(video, output_wav)
+
+    # 生成字幕
+    print("生成字幕...")
     transcript_cpp(output_wav, output_srt, prompt, dry_run)
+
+    # 应用自定义词典纠错
+    print("应用词典纠错...")
     sub(output_srt)
+
+    cost(start, prefix="字幕生成完成 ")
+    print(f"字幕文件已保存到: {output_srt}")
+    print(f"工作目录: {output_dir}")
+
+    return output_srt, output_dir
 
 
 def probe_duration(video):
@@ -370,24 +469,54 @@ def sub(srt_file: Path):
     subs.save(str(srt_file))
 
 
-def cut():
+def cut(working_dir: Path = None):
     """字幕编辑之后，进行视频切分、合并、压字幕、压缩及拷贝
 
     1. 剪掉语助（单行的好，呃等）
     2. 剪掉字幕中以[del]开头的event
     3. 根据自定义词典完成替换
+
+    Args:
+        working_dir: 工作目录，如果为None则从.log文件读取
     """
-    with open (".log", "r", encoding="utf-8") as f:
+    # 读取工作日志
+    if working_dir is None:
+        log_file = Path(".log")
+        if not log_file.exists():
+            # 尝试在当前目录查找最新的工作目录
+            possible_dirs = list(Path("/tmp/transcript").glob("*/.log"))
+            if possible_dirs:
+                log_file = max(possible_dirs, key=lambda x: x.stat().st_mtime)
+                print(f"使用最新的工作目录: {log_file.parent}")
+            else:
+                raise FileNotFoundError("找不到工作日志文件，请先运行transcript命令")
+    else:
+        log_file = Path(working_dir) / ".log"
+
+    with open(log_file, "r", encoding="utf-8") as f:
         log = json.load(f)
         name = log["name"]
         video = Path(log["raw_video"])
         parent = Path(log["working_dir"])
 
-    srt_file = Path(f"./{name}.srt").resolve()
+    # 查找字幕文件
+    srt_file = parent / f"{name}.srt"
+    if not srt_file.exists():
+        # 尝试在当前目录查找
+        srt_file = Path(f"./{name}.srt").resolve()
+        if not srt_file.exists():
+            raise FileNotFoundError(f"找不到字幕文件: {srt_file}")
 
     if not video.exists():
-        print(f"{video} does not exist")
-        return
+        # 尝试在工作目录查找视频文件
+        video_in_workspace = parent / Path(video).name
+        if video_in_workspace.exists():
+            video = video_in_workspace
+        else:
+            raise FileNotFoundError(f"找不到视频文件: {video}")
+
+    print(f"处理字幕文件: {srt_file}")
+    print(f"处理视频文件: {video}")
 
     workspace = parent / "cut"
     workspace.mkdir(exist_ok=True)
@@ -414,22 +543,25 @@ def cut():
         else:
             to_del.append([i, event.start, event.end])
             return event.duration
-        
+
+    deleted_count = 0
     for i, event in enumerate(subs.events):
         text = event.text
         if len(text) == 1 and text in markers:
             cum_lag += remove_event(to_del, i, event)
-            # print(f"del: {event.text}")
+            deleted_count += 1
+            print(f"删除语助词: {event.text}")
             continue
 
-        if text.startswith("[del]"):
+        if text.startswith("[del]") or text.startswith("[DEL]"):
             cum_lag += remove_event(to_del, i, event)
-            # print(f"del: {event.text}")
+            deleted_count += 1
+            print(f"删除标记字幕: {event.text}")
             continue
 
         replaced = "".join([custom_map.get(x, x) for x in jieba.cut(text)])
         if event.text != replaced:
-            print(f"{event.text} -> {replaced}")
+            print(f"词典纠错: {event.text} -> {replaced}")
 
         event.text = replaced
         event.start -= cum_lag
@@ -437,12 +569,22 @@ def cut():
         keep_subs.events.append(event)
 
     keep_subs.save(str(out_srt))
+    print(f"删除了 {deleted_count} 个字幕片段")
+    print(f"保留了 {len(keep_subs.events)} 个字幕片段")
 
     # 切分视频
-    cut_video(video, to_del, workspace)
-    print("字幕切分完成，开始合并和压缩")
+    if to_del:
+        print("开始切分视频...")
+        cut_video(video, to_del, workspace)
+        print("字幕切分完成，开始合并和压缩")
+    else:
+        print("没有需要删除的片段，直接进行合并")
+        # 创建一个包含完整视频的列表文件
+        list_file = workspace / "list.text"
+        with open(list_file, "w", encoding="utf-8") as f:
+            f.write(f"file '{video}'\n")
 
-    merge(workspace, parent.name)
+    return parent
 
 
 def adjust_subtitles_offset(srt: Path, opening_video: Path, full_srt: Path):
@@ -463,38 +605,75 @@ def adjust_subtitles_offset(srt: Path, opening_video: Path, full_srt: Path):
 
     subs.save(str(full_srt))
 
-def merge(dst: str=None, opening: bool = False, ending: bool = False):
+def merge(working_dir: Path = None, output_path: Path = None,
+          opening_video_path: Path = None, ending_video_path: Path = None):
     """合并剪辑片段、片头、片尾以及压缩
 
-    file 'file:/private/tmp/loseless/fa-00.30.58.083-00.45.58.083-seg4.mp4'" | ffmpeg -hide_banner -f concat -safe 0 -protocol_whitelist 'file,pipe,fd' -i - -map '0:0' '-c:0' copy '-disposition:0' default -map '0:1' '-c:1' copy '-disposition:1' default -movflags '+faststart' -default_mode infer_no_subs -ignore_unknown -f mp4 -y '/private/tmp/loseless/fa-merged.mp4'
+    Args:
+        working_dir: 工作目录，如果为None则从.log文件读取
+        output_path: 输出路径，如果为None则使用原视频位置
+        opening_video_path: 片头视频路径
+        ending_video_path: 片尾视频路径
 
     这一步之后，所有的字幕及剪辑都应该正确完成了
     """
-    log = json.load(open(".log", "r", encoding="utf-8"))
+    # 读取工作日志
+    if working_dir is None:
+        log_file = Path(".log")
+        if not log_file.exists():
+            possible_dirs = list(Path("/tmp/transcript").glob("*/.log"))
+            if possible_dirs:
+                log_file = max(possible_dirs, key=lambda x: x.stat().st_mtime)
+            else:
+                raise FileNotFoundError("找不到工作日志文件")
+    else:
+        log_file = Path(working_dir) / ".log"
+
+    log = json.load(open(log_file, "r", encoding="utf-8"))
     working_dir = Path(log["working_dir"])
     name = log["name"]
-
-    if dst is None:
-        dst = working_dir / f"{name}.mp4"
+    original_video = Path(log["raw_video"])
 
     cut_srt = working_dir / "cut.srt"
+    if not cut_srt.exists():
+        raise FileNotFoundError(f"找不到剪辑后的字幕文件: {cut_srt}")
 
     main_video = working_dir / "main.mp4"
     list_file = working_dir / "cut/list.text"
 
+    if not list_file.exists():
+        raise FileNotFoundError(f"找不到视频片段列表文件: {list_file}")
+
+    print("合并视频片段...")
     command = f"ffmpeg -hide_banner -f concat -safe 0 -i {list_file} -fflags +genpts -fps_mode vfr -c copy -map 0:v -map 0:a -disposition:s:0 default -movflags +faststart -video_track_timescale 600 -f mp4 -avoid_negative_ts make_zero -v error -y '{main_video}'"
 
     # merge main video
-    execute(command)
+    execute(command, msg="合并主视频")
 
-    # 加片头、片尾
-    video_files = [main_video]
-    if opening:
-        video_files.insert(0, opening_video)
-    if ending:
+    # 准备最终视频文件列表
+    video_files = []
+
+    # 添加片头
+    if opening_video_path and Path(opening_video_path).exists():
+        video_files.append(Path(opening_video_path))
+        print(f"添加片头视频: {opening_video_path}")
+    elif opening_video.exists():
+        video_files.append(opening_video)
+        print(f"使用默认片头视频: {opening_video}")
+
+    # 添加主视频
+    video_files.append(main_video)
+
+    # 添加片尾
+    if ending_video_path and Path(ending_video_path).exists():
+        video_files.append(Path(ending_video_path))
+        print(f"添加片尾视频: {ending_video_path}")
+    elif ending_video.exists():
         video_files.append(ending_video)
+        print(f"使用默认片尾视频: {ending_video}")
 
-    if opening or ending:
+    # 如果有片头或片尾，需要重新合并
+    if len(video_files) > 1:
         merge_list = working_dir / "full.text"
         merged_video = working_dir / f"full.mp4"
 
@@ -503,31 +682,64 @@ def merge(dst: str=None, opening: bool = False, ending: bool = False):
                 f.write(f"file '{video_file}'\n")
 
         cmd = f"ffmpeg -hide_banner -f concat -safe 0 -i {merge_list} -fflags +genpts -fps_mode vfr -c:v libx264 -preset slow -crf 23 -c:a copy -map 0:v -map 0:a -movflags +faststart -y -f mp4 -video_track_timescale 600 -avoid_negative_ts make_zero -v error {merged_video}"
-        execute(cmd, msg="加片头")
-    else:
-        merged_video = working_dir / "main.mp4"
+        execute(cmd, msg="合并完整视频")
 
-    # 自动对齐字幕
-    aligned_srt = working_dir.parent / f"{name}/aligned.srt"
+        # 如果有片头，需要调整字幕时间偏移
+        if opening_video_path or opening_video.exists():
+            opening_path = opening_video_path if opening_video_path else opening_video
+            adjusted_srt = working_dir / "adjusted.srt"
+            adjust_subtitles_offset(cut_srt, opening_path, adjusted_srt)
+            cut_srt = adjusted_srt
+    else:
+        merged_video = main_video
+
+    # 自动对齐字幕 - 这是关键步骤
+    print("开始字幕对齐...")
+    aligned_srt = working_dir / "aligned.srt"
     align_subtitles_with_audio(merged_video, cut_srt, aligned_srt)
 
+    # 确定最终输出路径
+    if output_path is None:
+        # 使用原视频的目录，文件名加后缀
+        output_dir = original_video.parent
+        base_name = original_video.stem
+    else:
+        output_path = Path(output_path)
+        if output_path.is_dir():
+            output_dir = output_path
+            base_name = name
+        else:
+            output_dir = output_path.parent
+            base_name = output_path.stem
+
+    # 生成最终文件路径
+    final_with_sub = output_dir / f"{base_name}-final-sub.mp4"
+    final_no_sub = output_dir / f"{base_name}-final.mp4"
+    final_srt = output_dir / f"{base_name}-final.srt"
+
+    print(f"输出目录: {output_dir}")
+    print(f"带字幕版本: {final_with_sub}")
+    print(f"无字幕版本: {final_no_sub}")
+
     # 压缩及烧字幕
-    with_sub = os.path.join(working_dir, f"{name}.sub.mp4")
-    cmd = f"ffmpeg -hide_banner -hwaccel videotoolbox -i {merged_video} -vf \"subtitles={aligned_srt}:force_style='FontName='WenQuanYi Micro Hei Light',FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=1'\" -c:v libx264 -preset slow -crf 23 -c:a copy -c:s copy -v error {with_sub}"
-    execute(cmd, msg="压缩、烧字幕")
+    print("生成带字幕版本...")
+    cmd = f"ffmpeg -hide_banner -i {merged_video} -vf \"subtitles={aligned_srt}:force_style='FontName=WenQuanYi Micro Hei Light,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=1'\" -c:v libx264 -preset slow -crf 23 -c:a copy -v error -y '{final_with_sub}'"
+    execute(cmd, msg="生成带字幕版本")
 
     # 压缩未加字幕的视频
-    no_sub = os.path.join(working_dir, f"{name}.mp4")
-    cmd = f"ffmpeg -hide_banner -hwaccel videotoolbox -i {merged_video} -c:v libx264 -preset slow -crf 23 -c:a copy -c:s copy -v error {no_sub}"
-    execute(cmd, msg="压缩")
+    print("生成无字幕版本...")
+    cmd = f"ffmpeg -hide_banner -i {merged_video} -c:v libx264 -preset slow -crf 23 -c:a copy -v error -y '{final_no_sub}'"
+    execute(cmd, msg="生成无字幕版本")
 
-    # 拷贝到目标目录
-    # dst = Path("/Volumes/share/data/autobackup/ke/factor-ml/", dst)
-    # print(f"copy to {dst}")
-    # shutil.copy(with_sub, dst / f"{course}.sub.mp4")
-    # shutil.copy(no_sub, dst / f"{course}.mp4")
-    # shutil.copy(aligned_srt, dst / f"{course}.srt")
-    # shutil.copy(cut_srt, dst / f"{course}.cut.srt")
+    # 复制字幕文件
+    shutil.copy2(aligned_srt, final_srt)
+
+    print("\n=== 处理完成 ===")
+    print(f"✅ 带字幕视频: {final_with_sub}")
+    print(f"✅ 无字幕视频: {final_no_sub}")
+    print(f"✅ 字幕文件: {final_srt}")
+
+    return final_with_sub, final_no_sub, final_srt
 
 
 def t2s(srt: str):
@@ -546,7 +758,56 @@ def t2s(srt: str):
 
     subs.save(srt_file)
 
+def process_video(input_video: str, output_path: str = None,
+                 opening_video: str = None, ending_video: str = None,
+                 auto_process: bool = False):
+    """
+    完整的视频处理流程
+
+    Args:
+        input_video: 输入视频文件路径
+        output_path: 输出路径（目录或文件路径）
+        opening_video: 片头视频路径
+        ending_video: 片尾视频路径
+        auto_process: 是否自动处理（跳过手动编辑步骤）
+    """
+    try:
+        print("=== 开始视频字幕处理流程 ===")
+
+        # 步骤1: 生成字幕
+        print("\n步骤1: 生成字幕")
+        srt_file, working_dir = transcript(input_video)
+
+        if not auto_process:
+            print(f"\n请编辑字幕文件: {srt_file}")
+            print("- 可以删除不需要的字幕行")
+            print("- 在需要删除的字幕前添加 [DEL] 标记")
+            print("- 编辑完成后按回车继续...")
+            input("按回车键继续...")
+
+        # 步骤2: 剪辑视频
+        print("\n步骤2: 剪辑视频")
+        working_dir = cut(working_dir)
+
+        # 步骤3: 合并和输出
+        print("\n步骤3: 合并和输出")
+        final_with_sub, final_no_sub, final_srt = merge(
+            working_dir=working_dir,
+            output_path=Path(output_path) if output_path else None,
+            opening_video_path=Path(opening_video) if opening_video else None,
+            ending_video_path=Path(ending_video) if ending_video else None
+        )
+
+        print("\n=== 处理完成 ===")
+        return final_with_sub, final_no_sub, final_srt
+
+    except Exception as e:
+        print(f"❌ 处理失败: {e}")
+        raise
+
+
 def test():
+    """测试模型加载功能"""
     import os
     print("HF_ENDPOINT:", os.environ.get("HF_ENDPOINT"))
     print("Model directory:", model_dir)
@@ -592,10 +853,13 @@ def test():
 
 fire.Fire(
     {
-        "transcript": transcript,  # 1 视频转字幕
-        "sub": sub,
-        "cut": cut,  # 2. 将字幕人工编辑后，对视频进行剪辑，输入工作目录
-        "t2s": t2s,
-        "merge": merge
+        "process": process_video,    # 完整处理流程
+        "transcript": transcript,    # 1. 视频转字幕
+        "cut": cut,                 # 2. 剪辑视频
+        "merge": merge,             # 3. 合并输出
+        "sub": sub,                 # 字幕纠错
+        "t2s": t2s,                 # 繁简转换
+        "test": test,               # 测试模型
+        "align": align_subtitles_with_audio  # 字幕对齐
     }
 )

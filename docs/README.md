@@ -34,6 +34,9 @@ python download_models.py
 ### 方法1: 完整自动流程
 
 ```bash
+# 进入transcript目录
+cd transcript
+
 # 基本用法
 python transcript.py process /path/to/video.mp4
 
@@ -53,11 +56,14 @@ python transcript.py process /path/to/video.mp4 --auto_process True
 ### 方法2: 分步执行
 
 ```bash
+# 进入transcript目录
+cd transcript
+
 # 步骤1: 生成字幕
 python transcript.py transcript /path/to/video.mp4
 
 # 步骤2: 手动编辑字幕文件
-# 编辑生成的.srt文件，在需要删除的字幕前添加[DEL]标记
+# 编辑项目根目录中生成的.srt文件，在需要删除的字幕前添加[DEL]标记
 
 # 步骤3: 剪辑视频
 python transcript.py cut
@@ -136,6 +142,9 @@ python transcript.py merge
 ### 模型加载失败
 
 ```bash
+# 进入transcript目录
+cd transcript
+
 # 测试模型加载
 python transcript.py test
 

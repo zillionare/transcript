@@ -250,7 +250,7 @@ def transcript_cpp(input_audio: Path, output_srt: Path, prompt: str, dry_run=Fal
 
 def init_jieba():
     custom_map = {}
-    dict_path = Path(__file__).parent.parent / "words.md"
+    dict_path = Path(__file__).parent.parent / "dict.md"
     with open(dict_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -615,6 +615,150 @@ def adjust_subtitles_offset(srt: Path, opening_video: Path, full_srt: Path):
 
     subs.save(str(full_srt))
 
+
+def optimize_subtitles_for_display(srt_file: Path, output_srt: Path = None):
+    """
+    优化字幕显示：自动换行和调整过长的字幕
+
+    Args:
+        srt_file: 输入字幕文件
+        output_srt: 输出字幕文件，如果为None则覆盖原文件
+    """
+    if output_srt is None:
+        output_srt = srt_file
+
+    subs = pysubs2.load(str(srt_file))
+
+    for event in subs.events:
+        text = event.text.strip()
+        if not text:
+            continue
+
+        # 计算字符长度（中文字符按2个字符计算）
+        char_count = sum(2 if ord(c) > 127 else 1 for c in text)
+
+        # 根据字符长度决定是否需要换行
+        if char_count > 40:  # 超过40个字符宽度需要换行
+            # 智能换行：优先在标点符号处换行
+            punctuation = '，。！？；：、'
+            words = []
+            current_word = ""
+
+            for char in text:
+                current_word += char
+                if char in punctuation:
+                    words.append(current_word)
+                    current_word = ""
+
+            if current_word:
+                words.append(current_word)
+
+            # 重新组织成两行
+            if len(words) > 1:
+                mid_point = len(words) // 2
+                line1 = ''.join(words[:mid_point]).strip()
+                line2 = ''.join(words[mid_point:]).strip()
+
+                # 确保两行长度相对均衡
+                line1_len = sum(2 if ord(c) > 127 else 1 for c in line1)
+                line2_len = sum(2 if ord(c) > 127 else 1 for c in line2)
+
+                if abs(line1_len - line2_len) > 10 and len(words) > 2:
+                    # 重新调整分割点
+                    best_split = mid_point
+                    best_diff = abs(line1_len - line2_len)
+
+                    for i in range(1, len(words)):
+                        test_line1 = ''.join(words[:i]).strip()
+                        test_line2 = ''.join(words[i:]).strip()
+                        test_len1 = sum(2 if ord(c) > 127 else 1 for c in test_line1)
+                        test_len2 = sum(2 if ord(c) > 127 else 1 for c in test_line2)
+                        test_diff = abs(test_len1 - test_len2)
+
+                        if test_diff < best_diff:
+                            best_diff = test_diff
+                            best_split = i
+
+                    line1 = ''.join(words[:best_split]).strip()
+                    line2 = ''.join(words[best_split:]).strip()
+
+                if line1 and line2:
+                    event.text = f"{line1}\\N{line2}"
+            else:
+                # 如果没有标点符号，按字符数强制换行
+                mid_char = len(text) // 2
+                # 寻找最近的空格或合适的断点
+                split_point = mid_char
+                for i in range(max(0, mid_char - 5), min(len(text), mid_char + 5)):
+                    if text[i] in ' \t':
+                        split_point = i
+                        break
+
+                line1 = text[:split_point].strip()
+                line2 = text[split_point:].strip()
+                if line1 and line2:
+                    event.text = f"{line1}\\N{line2}"
+
+    subs.save(str(output_srt))
+    print(f"字幕显示优化完成: {output_srt}")
+
+
+def get_adaptive_subtitle_style(srt_file: Path):
+    """
+    根据字幕内容生成自适应的字幕样式
+
+    Args:
+        srt_file: 字幕文件路径
+
+    Returns:
+        str: FFmpeg字幕样式字符串
+    """
+    subs = pysubs2.load(str(srt_file))
+
+    # 分析字幕特征
+    max_char_count = 0
+    avg_char_count = 0
+    total_events = 0
+
+    for event in subs.events:
+        if event.text.strip():
+            # 计算字符长度（中文字符按2个字符计算）
+            char_count = sum(2 if ord(c) > 127 else 1 for c in event.text)
+            max_char_count = max(max_char_count, char_count)
+            avg_char_count += char_count
+            total_events += 1
+
+    if total_events > 0:
+        avg_char_count /= total_events
+
+    # 根据字幕长度动态调整字体大小
+    if max_char_count > 60:
+        font_size = 18  # 很长的字幕用小字体
+    elif max_char_count > 40:
+        font_size = 20  # 较长的字幕用中等字体
+    elif avg_char_count > 30:
+        font_size = 22  # 平均较长用稍小字体
+    else:
+        font_size = 24  # 短字幕用正常字体
+
+    # 生成样式字符串 - 黑色字体白色边框方案
+    style = (
+        f"FontName=WenQuanYi Micro Hei Light,"
+        f"FontSize={font_size},"
+        f"PrimaryColour=&H00000000,"  # 黑色字体
+        f"OutlineColour=&H00FFFFFF," # 白色描边
+        f"Outline=10,"                # 10px白色描边
+        f"Shadow=0,"                 # 不使用阴影
+        f"MarginV=40,"               # 底部边距
+        f"MarginL=60,"               # 左边距
+        f"MarginR=60,"               # 右边距
+        f"Alignment=2,"              # 底部居中对齐
+        f"WrapStyle=2"               # 智能换行
+    )
+
+    print(f"自适应字幕样式: 字体大小={font_size}, 最长字幕={max_char_count}字符, 平均长度={avg_char_count:.1f}字符")
+    return style
+
 def merge(output_path: Path = None,
           opening_video_path: Path = None, ending_video_path: Path = None):
     """合并剪辑片段、片头、片尾以及压缩
@@ -726,9 +870,18 @@ def merge(output_path: Path = None,
     print(f"带字幕版本: {final_with_sub}")
     print(f"无字幕版本: {final_no_sub}")
 
+    # 优化字幕显示
+    print("优化字幕显示...")
+    optimized_srt = working_dir / "optimized.srt"
+    optimize_subtitles_for_display(aligned_srt, optimized_srt)
+
     # 压缩及烧字幕
     print("生成带字幕版本...")
-    cmd = f"ffmpeg -hide_banner -i {merged_video} -vf \"subtitles={aligned_srt}:force_style='FontName=WenQuanYi Micro Hei Light,FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=1'\" -c:v libx264 -preset slow -crf 23 -c:a copy -v error -y '{final_with_sub}'"
+
+    # 获取自适应字幕样式
+    subtitle_style = get_adaptive_subtitle_style(optimized_srt)
+
+    cmd = f"ffmpeg -hide_banner -i {merged_video} -vf \"subtitles={optimized_srt}:force_style='{subtitle_style}'\" -c:v libx264 -preset slow -crf 23 -c:a copy -v error -y '{final_with_sub}'"
     execute(cmd, msg="生成带字幕版本")
 
     # 压缩未加字幕的视频

@@ -1,19 +1,21 @@
 [project]
 name = "transcript"
 version = "0.1.0"
-description = ""
+description = "视频字幕处理工具 - 自动生成、编辑和处理视频字幕"
 authors = [
     {name = "Flora-cj",email = "1625864556@qq.com"}
 ]
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = [
-    "fire (>=0.7.0,<0.8.0)",
     "jieba (>=0.42.1,<0.43.0)",
     "opencc (>=1.1.9,<2.0.0)",
     "pysubs2 (>=1.8.0,<2.0.0)",
     "whisperx (>=3.3.4,<4.0.0)"
 ]
+
+[project.scripts]
+transcript = "transcript.cli:main"
 
 [[tool.poetry.source]]
 name = "ali"

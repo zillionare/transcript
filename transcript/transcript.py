@@ -31,7 +31,7 @@ from pathlib import Path
 from subprocess import PIPE, STDOUT, Popen
 from typing import Any, List, Tuple
 
-import fire
+# fire已移除，使用CLI接口
 import jieba
 import opencc
 import pysubs2
@@ -450,7 +450,7 @@ def cut_video(input_video: Path, to_del: List[Tuple[int, int, int]], out_dir: Pa
 
         tmp_file = os.path.join(out_dir, f"{i}-{start_time}-{end_time}.mp4")
         tmp_files.append(tmp_file)
-        cmd = f"ffmpeg -hide_banner -ss '{start_secs}' -i '{input_video}' -t '{dur}' -map '0:0' '-c:0' copy -map '0:1' '-c:1' copy -map_metadata 0 -movflags '+faststart' -default_mode infer_no_subs -ignore_unknown -f mp4 -video_track_timescale 600 -y -v error '{tmp_file}'"
+        cmd = f"ffmpeg -hide_banner -ss '{start_secs}' -i '{input_video}' -t '{dur}' -c copy -map 0:v -map 0:a -map_metadata 0 -movflags '+faststart' -f mp4 -video_track_timescale 600 -y -v error '{tmp_file}'"
 
         execute(cmd, supress_log=True)
 
@@ -649,7 +649,7 @@ def merge(output_path: Path = None,
         raise FileNotFoundError(f"找不到视频片段列表文件: {list_file}")
 
     print("合并视频片段...")
-    command = f"ffmpeg -hide_banner -f concat -safe 0 -i {list_file} -fflags +genpts -fps_mode vfr -c copy -map 0:v -map 0:a -disposition:s:0 default -movflags +faststart -video_track_timescale 600 -f mp4 -avoid_negative_ts make_zero -v error -y '{main_video}'"
+    command = f"ffmpeg -hide_banner -f concat -safe 0 -i {list_file} -fflags +genpts -c copy -map 0:v -map 0:a -movflags +faststart -video_track_timescale 600 -f mp4 -avoid_negative_ts make_zero -v error -y '{main_video}'"
 
     # merge main video
     execute(command, msg="合并主视频")
@@ -661,9 +661,6 @@ def merge(output_path: Path = None,
     if opening_video_path and Path(opening_video_path).exists():
         video_files.append(Path(opening_video_path))
         print(f"添加片头视频: {opening_video_path}")
-    elif opening_video.exists():
-        video_files.append(opening_video)
-        print(f"使用默认片头视频: {opening_video}")
 
     # 添加主视频
     video_files.append(main_video)
@@ -672,9 +669,6 @@ def merge(output_path: Path = None,
     if ending_video_path and Path(ending_video_path).exists():
         video_files.append(Path(ending_video_path))
         print(f"添加片尾视频: {ending_video_path}")
-    elif ending_video.exists():
-        video_files.append(ending_video)
-        print(f"使用默认片尾视频: {ending_video}")
 
     # 如果有片头或片尾，需要重新合并
     if len(video_files) > 1:
@@ -685,14 +679,21 @@ def merge(output_path: Path = None,
             for video_file in video_files:
                 f.write(f"file '{video_file}'\n")
 
-        cmd = f"ffmpeg -hide_banner -f concat -safe 0 -i {merge_list} -fflags +genpts -fps_mode vfr -c:v libx264 -preset slow -crf 23 -c:a copy -map 0:v -map 0:a -movflags +faststart -y -f mp4 -video_track_timescale 600 -avoid_negative_ts make_zero -v error {merged_video}"
-        execute(cmd, msg="合并完整视频")
+        # 首先尝试使用copy模式合并，避免重新编码
+        cmd_copy = f"ffmpeg -hide_banner -f concat -safe 0 -i {merge_list} -fflags +genpts -c copy -map 0:v -map 0:a -movflags +faststart -y -f mp4 -video_track_timescale 600 -v error {merged_video}"
+
+        try:
+            execute(cmd_copy, msg="合并完整视频(copy模式)")
+        except RuntimeError:
+            print("⚠️ copy模式失败，尝试重新编码...")
+            # 如果copy模式失败，使用重新编码
+            cmd_encode = f"ffmpeg -hide_banner -f concat -safe 0 -i {merge_list} -fflags +genpts -c:v libx264 -preset medium -crf 23 -c:a aac -b:a 128k -map 0:v -map 0:a -movflags +faststart -y -f mp4 -video_track_timescale 600 -v error {merged_video}"
+            execute(cmd_encode, msg="合并完整视频(重新编码)")
 
         # 如果有片头，需要调整字幕时间偏移
-        if opening_video_path or opening_video.exists():
-            opening_path = opening_video_path if opening_video_path else opening_video
+        if opening_video_path:
             adjusted_srt = working_dir / "adjusted.srt"
-            adjust_subtitles_offset(cut_srt, opening_path, adjusted_srt)
+            adjust_subtitles_offset(cut_srt, opening_video_path, adjusted_srt)
             cut_srt = adjusted_srt
     else:
         merged_video = main_video
@@ -783,7 +784,7 @@ def process_video(input_video: str, output_path: str = None,
 
         # 步骤1: 生成字幕
         print("\n步骤1: 生成字幕")
-        srt_file = transcript(input_video)
+        srt_file = transcript(Path(input_video))
 
         if not auto_process:
             print(f"\n请编辑字幕文件: {srt_file}")
@@ -810,6 +811,57 @@ def process_video(input_video: str, output_path: str = None,
     except Exception as e:
         print(f"❌ 处理失败: {e}")
         raise
+
+
+def resume(output_path: str = None, opening_video: str = None, ending_video: str = None):
+    """
+    编辑字幕后继续处理（自动调用align）
+
+    Args:
+        output_path: 输出路径（目录或文件路径）
+        opening_video: 片头视频路径
+        ending_video: 片尾视频路径
+    """
+    try:
+        print("=== 继续处理已编辑的字幕 ===")
+        print("将自动调用字幕对齐功能")
+
+        # 步骤1: 剪辑视频
+        print("\n步骤1: 剪辑视频")
+        cut()
+
+        # 步骤2: 合并和输出（merge函数内部会自动调用align）
+        print("\n步骤2: 合并和输出")
+        final_with_sub, final_no_sub, final_srt = merge(
+            output_path=Path(output_path) if output_path else None,
+            opening_video_path=Path(opening_video) if opening_video else None,
+            ending_video_path=Path(ending_video) if ending_video else None
+        )
+
+        print("\n=== 处理完成 ===")
+        print(f"✅ 带字幕视频: {final_with_sub}")
+        print(f"✅ 无字幕视频: {final_no_sub}")
+        print(f"✅ 字幕文件: {final_srt}")
+
+        return final_with_sub, final_no_sub, final_srt
+
+    except Exception as e:
+        print(f"❌ 处理失败: {e}")
+        raise
+
+
+def auto(input_video: str, output_path: str = None,
+         opening_video: str = None, ending_video: str = None):
+    """
+    自动处理流程（无需手动编辑字幕）
+
+    Args:
+        input_video: 输入视频文件路径
+        output_path: 输出路径（目录或文件路径）
+        opening_video: 片头视频路径
+        ending_video: 片尾视频路径
+    """
+    return process_video(input_video, output_path, opening_video, ending_video, auto_process=True)
 
 
 def test():
@@ -857,15 +909,5 @@ def test():
         print(f"❌ Model loading failed: {e}")
         print("Please check if the model files are properly downloaded.")
 
-fire.Fire(
-    {
-        "process": process_video,    # 完整处理流程
-        "transcript": transcript,    # 1. 视频转字幕
-        "cut": cut,                 # 2. 剪辑视频
-        "merge": merge,             # 3. 合并输出
-        "sub": sub,                 # 字幕纠错
-        "t2s": t2s,                 # 繁简转换
-        "test": test,               # 测试模型
-        "align": align_subtitles_with_audio  # 字幕对齐
-    }
-)
+# CLI入口点已移至 transcript/cli.py
+# 如需使用原版命令，请直接导入相应函数

@@ -503,13 +503,19 @@ def cut():
         video = Path(log["raw_video"])
         parent = Path(log["working_dir"])
 
-    # 查找字幕文件
-    srt_file = parent / f"{name}.srt"
+    # 查找字幕文件 - 优先查找项目根目录
+    script_dir = Path(__file__).parent
+    project_root = script_dir.parent
+    srt_file = project_root / f"{name}.srt"
+
     if not srt_file.exists():
-        # 尝试在当前目录查找
-        srt_file = Path(f"./{name}.srt").resolve()
+        # 尝试在工作目录查找
+        srt_file = parent / f"{name}.srt"
         if not srt_file.exists():
-            raise FileNotFoundError(f"找不到字幕文件: {srt_file}")
+            # 尝试在当前目录查找
+            srt_file = Path(f"./{name}.srt").resolve()
+            if not srt_file.exists():
+                raise FileNotFoundError(f"找不到字幕文件: {srt_file}")
 
     if not video.exists():
         # 尝试在工作目录查找视频文件
@@ -742,8 +748,11 @@ def merge(output_path: Path = None,
 
 def t2s(srt: str):
     """将繁中转换为简中"""
-    srt_file = convert_path(srt)
-    subs = pysubs2.load(srt_file)
+    srt_file = Path(srt)
+    if not srt_file.exists():
+        raise FileNotFoundError(f"字幕文件不存在: {srt_file}")
+
+    subs = pysubs2.load(str(srt_file))
 
     converter = opencc.OpenCC("t2s.json")
     for event in subs.events:
@@ -754,7 +763,7 @@ def t2s(srt: str):
             print(f"{event.text} -> {replaced}")
         event.text = replaced
 
-    subs.save(srt_file)
+    subs.save(str(srt_file))
 
 def process_video(input_video: str, output_path: str = None,
                  opening_video: str = None, ending_video: str = None,

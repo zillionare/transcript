@@ -6,7 +6,7 @@ authors = [
     {name = "Flora-cj",email = "1625864556@qq.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 dependencies = [
     "fire (>=0.7.0,<0.8.0)",
     "jieba (>=0.42.1,<0.43.0)",
@@ -15,6 +15,9 @@ dependencies = [
     "whisperx (>=3.3.4,<4.0.0)"
 ]
 
+[[tool.poetry.source]]
+name = "ali"
+url = "https://mirrors.aliyun.com/pypi/simple"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

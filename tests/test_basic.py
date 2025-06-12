@@ -14,7 +14,7 @@ def test_imports():
     """测试模块导入"""
     print("测试模块导入...")
     try:
-        import transcript
+        import transcript.transcript as transcript
         print("✅ transcript模块导入成功")
         
         # 测试主要函数是否存在
@@ -56,7 +56,7 @@ def test_model_config():
     """测试模型配置"""
     print("\n测试模型配置...")
     try:
-        import transcript
+        import transcript.transcript as transcript
         
         print(f"模型目录: {transcript.model_dir}")
         print(f"Whisper模型: {transcript.whisperx_model}")
@@ -78,7 +78,7 @@ def test_words_dict():
     """测试自定义词典"""
     print("\n测试自定义词典...")
     try:
-        import transcript
+        import transcript.transcript as transcript
         
         words_file = Path("words.md")
         if words_file.exists():
@@ -104,7 +104,7 @@ def test_file_operations():
     """测试文件操作功能"""
     print("\n测试文件操作...")
     try:
-        from transcript import _ms_to_hms, probe_duration
+        from transcript.transcript import _ms_to_hms, probe_duration
         
         # 测试时间转换
         test_ms = 65000  # 1分5秒

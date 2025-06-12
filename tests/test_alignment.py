@@ -15,7 +15,7 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 # 导入我们的函数
 import sys
 sys.path.append('.')
-import transcript
+import transcript.transcript as transcript
 
 def create_test_srt():
     """创建一个测试字幕文件"""

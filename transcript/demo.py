@@ -68,7 +68,7 @@ def demo_basic_functions():
     print("\n=== 演示基本功能 ===")
     
     try:
-        import transcript
+        import transcript.transcript as transcript
         
         # 1. 测试词典加载
         print("\n1. 测试自定义词典...")
@@ -175,7 +175,7 @@ def main():
     # 检查依赖
     print("检查依赖...")
     try:
-        import transcript
+        import transcript.transcript as transcript
         import fire
         import jieba
         import pysubs2

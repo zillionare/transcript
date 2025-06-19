@@ -8,5 +8,7 @@ replace:
   因子科: 因子课
   Pentas: pandas
   矿体: 匡醍
+  过渡拟核: 过度拟合
+  过拟核:过拟合
 warning:
   - 24克

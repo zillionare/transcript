@@ -309,26 +309,50 @@ def init_jieba():
 
 
 def transcriptx(input_audio: Path, output_srt: Path, prompt: str):
+    """使用whisperx进行音频转录"""
+    print(f"使用whisperx转录音频: {input_audio} -> {output_srt}")
+
     compute_type = "default"
     device = "cpu"
 
-    options = {"initial_prompt": prompt}
-    model = whisperx.load_model(
-        whisperx_model,
-        device=device,
-        compute_type=compute_type,
-        asr_options=options,
-        language="zh",
-        threads=8,
-    )
+    try:
+        options = {"initial_prompt": prompt}
+        print("加载whisperx模型...")
+        model = whisperx.load_model(
+            whisperx_model,
+            device=device,
+            compute_type=compute_type,
+            asr_options=options,
+            language="zh",
+            threads=8,
+        )
 
-    audio = whisperx.load_audio(input_audio)
-    result = model.transcribe(
-        audio, language="zh", print_progress=True, batch_size=8, chunk_size=10
-    )
+        print("加载音频文件...")
+        audio = whisperx.load_audio(str(input_audio))
 
-    subs = pysubs2.load_from_whisper(result["segments"])
-    subs.save(str(output_srt))
+        print("开始转录...")
+        result = model.transcribe(
+            audio, language="zh", print_progress=True, batch_size=8, chunk_size=10
+        )
+
+        if "segments" not in result or not result["segments"]:
+            print("⚠️ 转录结果为空，创建空字幕文件")
+            # 创建一个空的字幕文件
+            empty_subs = pysubs2.SSAFile()
+            empty_subs.save(str(output_srt))
+        else:
+            print(f"转录完成，共 {len(result['segments'])} 个片段")
+            subs = pysubs2.load_from_whisper(result["segments"])
+            subs.save(str(output_srt))
+            print(f"字幕文件已保存: {output_srt}")
+
+    except Exception as e:
+        print(f"❌ whisperx转录失败: {e}")
+        # 创建一个空的字幕文件以避免后续错误
+        print("创建空字幕文件以避免后续错误...")
+        empty_subs = pysubs2.SSAFile()
+        empty_subs.save(str(output_srt))
+        raise
     # 2. Align whisper output
     # model_a, metadata = whisperx.load_align_model(
     #     language_code=result["language"], device=device, model_name = w2v_model
@@ -362,28 +386,42 @@ def cost(start, cmd: str = "", prefix=""):
     )
 
 
-def transcript(input_video: Path, output_dir: Path = None, dry_run=False):
+def is_audio_file(file_path: Path) -> bool:
+    """检测是否为音频文件"""
+    audio_extensions = {'.wav', '.mp3', '.m4a', '.flac', '.aac', '.ogg', '.wma'}
+    return file_path.suffix.lower() in audio_extensions
+
+
+def is_video_file(file_path: Path) -> bool:
+    """检测是否为视频文件"""
+    video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv'}
+    return file_path.suffix.lower() in video_extensions
+
+
+def transcript(input_file: Path, output_dir: Path = None, dry_run=False):
     """
-    将视频转换为字幕文件
+    将视频或音频文件转换为字幕文件
 
     Args:
-        input_video: 输入视频文件路径
+        input_file: 输入视频或音频文件路径
         output_dir: 输出目录，如果为None则将srt文件保存到项目根目录
         dry_run: 是否为试运行模式
     """
-    input_video = Path(input_video)
+    input_file = Path(input_file)
 
     # 验证输入文件存在
-    if not input_video.exists():
-        raise FileNotFoundError(f"输入视频文件不存在: {input_video}")
+    if not input_file.exists():
+        raise FileNotFoundError(f"输入文件不存在: {input_file}")
 
     # 验证文件格式
-    valid_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv'}
-    if input_video.suffix.lower() not in valid_extensions:
-        raise ValueError(f"不支持的视频格式: {input_video.suffix}")
+    is_audio = is_audio_file(input_file)
+    is_video = is_video_file(input_file)
 
-    # 使用视频文件名（不含扩展名）作为项目名称
-    name = input_video.stem
+    if not (is_audio or is_video):
+        raise ValueError(f"不支持的文件格式: {input_file.suffix}。支持的格式：视频(.mp4, .avi, .mov, .mkv, .flv, .wmv)，音频(.wav, .mp3, .m4a, .flac, .aac, .ogg, .wma)")
+
+    # 使用文件名（不含扩展名）作为项目名称
+    name = input_file.stem
 
     # 设置工作目录（用于临时文件）
     working_dir = Path("/tmp/transcript") / name
@@ -405,36 +443,76 @@ def transcript(input_video: Path, output_dir: Path = None, dry_run=False):
         json.dump({
             "working_dir": str(working_dir),
             "name": name,
-            "raw_video": str(input_video),
+            "raw_file": str(input_file),
+            "file_type": "audio" if is_audio else "video",
             "timestamp": datetime.datetime.now().isoformat()
             }, f, indent=2)
 
-    # 复制视频到工作目录
-    video = working_dir / input_video.name
-    if not video.exists():
-        print(f"复制视频文件到工作目录: {input_video} -> {video}")
-        shutil.copy(input_video, video)
+    # 复制文件到工作目录
+    media_file = working_dir / input_file.name
+    if not media_file.exists():
+        print(f"复制{'音频' if is_audio else '视频'}文件到工作目录: {input_file} -> {media_file}")
+        shutil.copy(input_file, media_file)
 
     # 设置临时srt文件路径（在工作目录中）
     temp_srt = working_dir / f"{name}.srt"
-    output_wav = video.with_suffix(".wav")
 
     # 设置最终srt文件路径（在项目根目录中）
     final_srt = final_output_dir / f"{name}.srt"
 
-    print(f"开始转换视频为字幕: {input_video} -> {final_srt}")
+    print(f"开始转换{'音频' if is_audio else '视频'}为字幕: {input_file} -> {final_srt}")
 
-    # 提取音频
+    # 处理音频
     start = datetime.datetime.now()
     print(f"{start.hour:02d}:{start.minute:02d}:{start.second:02d}: 开始处理")
 
-    if not output_wav.exists():
-        print("提取音频...")
-        extract_audio(video, output_wav)
+    if is_audio:
+        # 对于音频文件，需要确保格式为16kHz WAV
+        output_wav = media_file.with_suffix(".wav")
+        if not output_wav.exists():
+            print("转换音频格式为16kHz WAV...")
+            # 强制转换为16kHz采样率，这是whisper.cpp的要求
+            cmd = f"ffmpeg -i '{media_file}' -acodec pcm_s16le -ar 16000 -ac 1 -y '{output_wav}' -v error"
+            execute(cmd)
+        else:
+            # 即使是WAV文件，也需要检查采样率
+            print("检查并转换音频采样率为16kHz...")
+            temp_wav = output_wav.parent / f"{output_wav.stem}_temp.wav"
+            cmd = f"ffmpeg -i '{output_wav}' -acodec pcm_s16le -ar 16000 -ac 1 -y '{temp_wav}' -v error"
+            execute(cmd)
+            # 替换原文件
+            import os
+            os.replace(temp_wav, output_wav)
+    else:
+        # 对于视频文件，提取音频
+        output_wav = media_file.with_suffix(".wav")
+        if not output_wav.exists():
+            print("提取音频...")
+            extract_audio(media_file, output_wav)
 
     # 生成字幕到临时位置
     print("生成字幕...")
-    transcript_cpp(output_wav, temp_srt, prompt, dry_run)
+
+    # 检查whisper.cpp是否可用，如果不可用则使用whisperx
+    whisper_cpp_available = cpp_path.exists() and cpp_model.exists()
+
+    if whisper_cpp_available and not dry_run:
+        try:
+            transcript_cpp(output_wav, temp_srt, prompt, dry_run)
+        except Exception as e:
+            print(f"⚠️ whisper.cpp转录失败: {e}")
+            print("回退到whisperx转录...")
+            transcriptx(output_wav, temp_srt, prompt)
+    else:
+        if not whisper_cpp_available:
+            print("⚠️ whisper.cpp不可用，使用whisperx转录...")
+        transcriptx(output_wav, temp_srt, prompt)
+
+    # 检查字幕文件是否生成成功
+    if not temp_srt.exists():
+        raise FileNotFoundError(f"字幕生成失败，文件不存在: {temp_srt}")
+
+    print(f"✅ 字幕文件生成成功: {temp_srt}")
 
     # 应用自定义词典纠错
     print("应用词典纠错...")
@@ -505,13 +583,76 @@ def cut_video(input_video: Path, to_del: List[Tuple[int, int, int]], out_dir: Pa
     return list_file
 
 
+def cut_audio(input_audio: Path, to_del: List[Tuple[int, int, int]], out_dir: Path):
+    """根据slices剪去音频片段
+
+    类似cut_video但处理音频文件
+    """
+    duration = probe_duration(input_audio) * 1000
+
+    edges = [item for sublist in to_del for item in sublist[1:]]
+    edges.insert(0, 0)
+    edges.append(int(duration))
+
+    if edges[:2] == [0, 0]:
+        edges = edges[2:]
+
+    slices = [(edges[i], edges[i + 1]) for i in range(0, len(edges) - 1, 2)]
+
+    tmp_files = []
+
+    for i, (start, end) in enumerate(slices):
+        start_time = _ms_to_hms(start)
+        end_time = _ms_to_hms(end)
+        start_secs = f"{start/1000:.3f}"
+        dur = f"'{(end - start)/1000:.3f}'"
+
+        # 保持原音频格式
+        audio_ext = input_audio.suffix
+        tmp_file = os.path.join(out_dir, f"{i}-{start_time}-{end_time}{audio_ext}")
+        tmp_files.append(tmp_file)
+
+        # 音频剪辑命令，不需要视频相关参数
+        cmd = f"ffmpeg -hide_banner -ss '{start_secs}' -i '{input_audio}' -t '{dur}' -c copy -y -v error '{tmp_file}'"
+
+        execute(cmd, supress_log=True)
+
+    list_file = os.path.join(out_dir, "list.text")
+    with open(list_file, "w", encoding="utf-8") as f:
+        for audio in tmp_files:
+            f.write(f"file '{audio}'\n")
+
+    return list_file
+
+
 def sub(srt_file: Path):
     """输入字幕文件，通过自定义词典，先粗筛一次。在transcript之后被自动调用。
 
     Args:
         srt_file (str): _description_
     """
-    subs = pysubs2.load(str(srt_file))
+    try:
+        subs = pysubs2.load(str(srt_file))
+    except Exception as e:
+        print(f"⚠️ 加载字幕文件失败: {e}")
+        # 检查文件是否为空或格式不正确
+        if srt_file.exists():
+            with open(srt_file, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+            if not content:
+                print("字幕文件为空，创建空的字幕对象")
+                subs = pysubs2.SSAFile()
+                # 保存空字幕文件以确保格式正确
+                subs.save(str(srt_file))
+                return  # 空文件无需进一步处理
+            else:
+                print(f"字幕文件内容: {content[:200]}...")
+                raise
+        else:
+            print("字幕文件不存在，创建空的字幕对象")
+            subs = pysubs2.SSAFile()
+            subs.save(str(srt_file))
+            return
 
     replace_map, warning_words = init_jieba()
     warnings_found = []
@@ -567,7 +708,14 @@ def cut():
     with open(log_file, "r", encoding="utf-8") as f:
         log = json.load(f)
         name = log["name"]
-        video = Path(log["raw_video"])
+        # 兼容旧版本日志格式
+        if "raw_file" in log:
+            media_file = Path(log["raw_file"])
+            file_type = log.get("file_type", "video")  # 默认为视频
+        else:
+            # 兼容旧版本
+            media_file = Path(log["raw_video"])
+            file_type = "video"
         parent = Path(log["working_dir"])
 
     # 查找字幕文件 - 优先查找项目根目录
@@ -584,16 +732,16 @@ def cut():
             if not srt_file.exists():
                 raise FileNotFoundError(f"找不到字幕文件: {srt_file}")
 
-    if not video.exists():
-        # 尝试在工作目录查找视频文件
-        video_in_workspace = parent / Path(video).name
-        if video_in_workspace.exists():
-            video = video_in_workspace
+    if not media_file.exists():
+        # 尝试在工作目录查找媒体文件
+        media_in_workspace = parent / Path(media_file).name
+        if media_in_workspace.exists():
+            media_file = media_in_workspace
         else:
-            raise FileNotFoundError(f"找不到视频文件: {video}")
+            raise FileNotFoundError(f"找不到{'音频' if file_type == 'audio' else '视频'}文件: {media_file}")
 
     print(f"处理字幕文件: {srt_file}")
-    print(f"处理视频文件: {video}")
+    print(f"处理{'音频' if file_type == 'audio' else '视频'}文件: {media_file}")
 
     workspace = parent / "cut"
     workspace.mkdir(exist_ok=True)
@@ -655,17 +803,22 @@ def cut():
     print(f"删除了 {deleted_count} 个字幕片段")
     print(f"保留了 {len(keep_subs.events)} 个字幕片段")
 
-    # 切分视频
+    # 切分媒体文件
     if to_del:
-        print("开始切分视频...")
-        cut_video(video, to_del, workspace)
-        print("字幕切分完成，开始合并和压缩")
+        if file_type == "audio":
+            print("开始切分音频...")
+            cut_audio(media_file, to_del, workspace)
+            print("音频切分完成，开始合并")
+        else:
+            print("开始切分视频...")
+            cut_video(media_file, to_del, workspace)
+            print("视频切分完成，开始合并和压缩")
     else:
         print("没有需要删除的片段，直接进行合并")
-        # 创建一个包含完整视频的列表文件
+        # 创建一个包含完整媒体文件的列表文件
         list_file = workspace / "list.text"
         with open(list_file, "w", encoding="utf-8") as f:
-            f.write(f"file '{video}'\n")
+            f.write(f"file '{media_file}'\n")
 
     return parent
 
@@ -853,78 +1006,96 @@ def merge(output_path: Path = None,
     log = json.load(open(log_file, "r", encoding="utf-8"))
     working_dir = Path(log["working_dir"])
     name = log["name"]
-    original_video = Path(log["raw_video"])
+
+    # 兼容旧版本日志格式
+    if "raw_file" in log:
+        original_file = Path(log["raw_file"])
+        file_type = log.get("file_type", "video")  # 默认为视频
+    else:
+        # 兼容旧版本
+        original_file = Path(log["raw_video"])
+        file_type = "video"
 
     cut_srt = working_dir / "cut.srt"
     if not cut_srt.exists():
         raise FileNotFoundError(f"找不到剪辑后的字幕文件: {cut_srt}")
 
-    main_video = working_dir / "main.mp4"
     list_file = working_dir / "cut/list.text"
 
     if not list_file.exists():
-        raise FileNotFoundError(f"找不到视频片段列表文件: {list_file}")
+        raise FileNotFoundError(f"找不到{'音频' if file_type == 'audio' else '视频'}片段列表文件: {list_file}")
 
-    print("合并视频片段...")
-    command = f"ffmpeg -hide_banner -f concat -safe 0 -i {list_file} -fflags +genpts -c copy -map 0:v -map 0:a -movflags +faststart -video_track_timescale 600 -f mp4 -avoid_negative_ts make_zero -v error -y '{main_video}'"
-
-    # merge main video
-    execute(command, msg="合并主视频")
-
-    # 准备最终视频文件列表
-    video_files = []
-
-    # 添加片头
-    if opening_video_path and Path(opening_video_path).exists():
-        video_files.append(Path(opening_video_path))
-        print(f"添加片头视频: {opening_video_path}")
-
-    # 添加主视频
-    video_files.append(main_video)
-
-    # 添加片尾
-    if ending_video_path and Path(ending_video_path).exists():
-        video_files.append(Path(ending_video_path))
-        print(f"添加片尾视频: {ending_video_path}")
-
-    # 如果有片头或片尾，需要重新合并
-    if len(video_files) > 1:
-        merge_list = working_dir / "full.text"
-        merged_video = working_dir / f"full.mp4"
-
-        with open(merge_list, "w", encoding="utf-8") as f:
-            for video_file in video_files:
-                f.write(f"file '{video_file}'\n")
-
-        # 首先尝试使用copy模式合并，避免重新编码
-        cmd_copy = f"ffmpeg -hide_banner -f concat -safe 0 -i {merge_list} -fflags +genpts -c copy -map 0:v -map 0:a -movflags +faststart -y -f mp4 -video_track_timescale 600 -v error {merged_video}"
-
-        try:
-            execute(cmd_copy, msg="合并完整视频(copy模式)")
-        except RuntimeError:
-            print("⚠️ copy模式失败，尝试重新编码...")
-            # 如果copy模式失败，使用重新编码
-            cmd_encode = f"ffmpeg -hide_banner -f concat -safe 0 -i {merge_list} -fflags +genpts -c:v libx264 -preset medium -crf 23 -c:a aac -b:a 128k -map 0:v -map 0:a -movflags +faststart -y -f mp4 -video_track_timescale 600 -v error {merged_video}"
-            execute(cmd_encode, msg="合并完整视频(重新编码)")
-
-        # 如果有片头，需要调整字幕时间偏移
-        if opening_video_path:
-            adjusted_srt = working_dir / "adjusted.srt"
-            adjust_subtitles_offset(cut_srt, opening_video_path, adjusted_srt)
-            cut_srt = adjusted_srt
+    if file_type == "audio":
+        # 音频处理
+        main_audio = working_dir / f"main{original_file.suffix}"
+        print("合并音频片段...")
+        command = f"ffmpeg -hide_banner -f concat -safe 0 -i {list_file} -fflags +genpts -c copy -avoid_negative_ts make_zero -v error -y '{main_audio}'"
+        execute(command, msg="合并主音频")
+        merged_media = main_audio
     else:
-        merged_video = main_video
+        # 视频处理
+        main_video = working_dir / "main.mp4"
+        print("合并视频片段...")
+        command = f"ffmpeg -hide_banner -f concat -safe 0 -i {list_file} -fflags +genpts -c copy -map 0:v -map 0:a -movflags +faststart -video_track_timescale 600 -f mp4 -avoid_negative_ts make_zero -v error -y '{main_video}'"
+        execute(command, msg="合并主视频")
+        merged_media = main_video
+
+    if file_type == "video":
+        # 视频处理：支持片头片尾
+        video_files = []
+
+        # 添加片头
+        if opening_video_path and Path(opening_video_path).exists():
+            video_files.append(Path(opening_video_path))
+            print(f"添加片头视频: {opening_video_path}")
+
+        # 添加主视频
+        video_files.append(merged_media)
+
+        # 添加片尾
+        if ending_video_path and Path(ending_video_path).exists():
+            video_files.append(Path(ending_video_path))
+            print(f"添加片尾视频: {ending_video_path}")
+
+        # 如果有片头或片尾，需要重新合并
+        if len(video_files) > 1:
+            merge_list = working_dir / "full.text"
+            merged_video = working_dir / f"full.mp4"
+
+            with open(merge_list, "w", encoding="utf-8") as f:
+                for video_file in video_files:
+                    f.write(f"file '{video_file}'\n")
+
+            # 首先尝试使用copy模式合并，避免重新编码
+            cmd_copy = f"ffmpeg -hide_banner -f concat -safe 0 -i {merge_list} -fflags +genpts -c copy -map 0:v -map 0:a -movflags +faststart -y -f mp4 -video_track_timescale 600 -v error {merged_video}"
+
+            try:
+                execute(cmd_copy, msg="合并完整视频(copy模式)")
+            except RuntimeError:
+                print("⚠️ copy模式失败，尝试重新编码...")
+                # 如果copy模式失败，使用重新编码
+                cmd_encode = f"ffmpeg -hide_banner -f concat -safe 0 -i {merge_list} -fflags +genpts -c:v libx264 -preset medium -crf 23 -c:a aac -b:a 128k -map 0:v -map 0:a -movflags +faststart -y -f mp4 -video_track_timescale 600 -v error {merged_video}"
+                execute(cmd_encode, msg="合并完整视频(重新编码)")
+
+            # 如果有片头，需要调整字幕时间偏移
+            if opening_video_path:
+                adjusted_srt = working_dir / "adjusted.srt"
+                adjust_subtitles_offset(cut_srt, opening_video_path, adjusted_srt)
+                cut_srt = adjusted_srt
+
+            merged_media = merged_video
+        # 如果没有片头片尾，merged_media 已经是正确的文件
 
     # 自动对齐字幕 - 这是关键步骤
     print("开始字幕对齐...")
     aligned_srt = working_dir / "aligned.srt"
-    align_subtitles_with_audio(merged_video, cut_srt, aligned_srt)
+    align_subtitles_with_audio(merged_media, cut_srt, aligned_srt)
 
     # 确定最终输出路径
     if output_path is None:
-        # 使用原视频的目录，文件名加后缀
-        output_dir = original_video.parent
-        base_name = original_video.stem
+        # 使用原文件的目录，文件名加后缀
+        output_dir = original_file.parent
+        base_name = original_file.stem
     else:
         output_path = Path(output_path)
         if output_path.is_dir():
@@ -935,42 +1106,65 @@ def merge(output_path: Path = None,
             base_name = output_path.stem
 
     # 生成最终文件路径
-    final_with_sub = output_dir / f"{base_name}-final-sub.mp4"
-    final_no_sub = output_dir / f"{base_name}-final.mp4"
-    final_srt = output_dir / f"{base_name}-final.srt"
+    if file_type == "audio":
+        # 音频文件输出
+        final_audio = output_dir / f"{base_name}-final{original_file.suffix}"
+        final_srt = output_dir / f"{base_name}-final.srt"
 
-    print(f"输出目录: {output_dir}")
-    print(f"带字幕版本: {final_with_sub}")
-    print(f"无字幕版本: {final_no_sub}")
+        print(f"输出目录: {output_dir}")
+        print(f"剪辑音频: {final_audio}")
+        print(f"字幕文件: {final_srt}")
 
-    # 优化字幕显示
-    print("优化字幕显示...")
-    optimized_srt = working_dir / "optimized.srt"
-    optimize_subtitles_for_display(aligned_srt, optimized_srt)
+        # 复制剪辑后的音频文件
+        print("复制剪辑后的音频...")
+        shutil.copy2(merged_media, final_audio)
 
-    # 压缩及烧字幕
-    print("生成带字幕版本...")
+        # 复制字幕文件
+        shutil.copy2(aligned_srt, final_srt)
 
-    # 获取自适应字幕样式
-    subtitle_style = get_adaptive_subtitle_style(optimized_srt)
+        print("\n=== 音频处理完成 ===")
+        print(f"✅ 剪辑音频: {final_audio}")
+        print(f"✅ 字幕文件: {final_srt}")
 
-    cmd = f"ffmpeg -hide_banner -i {merged_video} -vf \"subtitles={optimized_srt}:force_style='{subtitle_style}'\" -c:v libx264 -preset slow -crf 23 -c:a copy -v error -y '{final_with_sub}'"
-    execute(cmd, msg="生成带字幕版本")
+        return final_audio, None, final_srt
+    else:
+        # 视频文件输出
+        final_with_sub = output_dir / f"{base_name}-final-sub.mp4"
+        final_no_sub = output_dir / f"{base_name}-final.mp4"
+        final_srt = output_dir / f"{base_name}-final.srt"
 
-    # 压缩未加字幕的视频
-    print("生成无字幕版本...")
-    cmd = f"ffmpeg -hide_banner -i {merged_video} -c:v libx264 -preset slow -crf 23 -c:a copy -v error -y '{final_no_sub}'"
-    execute(cmd, msg="生成无字幕版本")
+        print(f"输出目录: {output_dir}")
+        print(f"带字幕版本: {final_with_sub}")
+        print(f"无字幕版本: {final_no_sub}")
 
-    # 复制字幕文件
-    shutil.copy2(aligned_srt, final_srt)
+        # 优化字幕显示
+        print("优化字幕显示...")
+        optimized_srt = working_dir / "optimized.srt"
+        optimize_subtitles_for_display(aligned_srt, optimized_srt)
 
-    print("\n=== 处理完成 ===")
-    print(f"✅ 带字幕视频: {final_with_sub}")
-    print(f"✅ 无字幕视频: {final_no_sub}")
-    print(f"✅ 字幕文件: {final_srt}")
+        # 压缩及烧字幕
+        print("生成带字幕版本...")
 
-    return final_with_sub, final_no_sub, final_srt
+        # 获取自适应字幕样式
+        subtitle_style = get_adaptive_subtitle_style(optimized_srt)
+
+        cmd = f"ffmpeg -hide_banner -i {merged_media} -vf \"subtitles={optimized_srt}:force_style='{subtitle_style}'\" -c:v libx264 -preset slow -crf 23 -c:a copy -v error -y '{final_with_sub}'"
+        execute(cmd, msg="生成带字幕版本")
+
+        # 压缩未加字幕的视频
+        print("生成无字幕版本...")
+        cmd = f"ffmpeg -hide_banner -i {merged_media} -c:v libx264 -preset slow -crf 23 -c:a copy -v error -y '{final_no_sub}'"
+        execute(cmd, msg="生成无字幕版本")
+
+        # 复制字幕文件
+        shutil.copy2(aligned_srt, final_srt)
+
+        print("\n=== 视频处理完成 ===")
+        print(f"✅ 带字幕视频: {final_with_sub}")
+        print(f"✅ 无字幕视频: {final_no_sub}")
+        print(f"✅ 字幕文件: {final_srt}")
+
+        return final_with_sub, final_no_sub, final_srt
 
 
 def t2s(srt: str):

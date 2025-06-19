@@ -33,17 +33,17 @@ def create_parser():
         'auto',
         help='自动处理流程（无需手动编辑字幕）'
     )
-    auto_parser.add_argument('video', help='输入视频文件路径')
+    auto_parser.add_argument('video', help='输入视频或音频文件路径')
     auto_parser.add_argument('-o', '--output', help='输出目录')
-    auto_parser.add_argument('--opening', help='片头视频路径')
-    auto_parser.add_argument('--ending', help='片尾视频路径')
+    auto_parser.add_argument('--opening', help='片头视频路径（仅视频文件支持）')
+    auto_parser.add_argument('--ending', help='片尾视频路径（仅视频文件支持）')
 
     # 2. gen - 生成字幕
     gen_parser = subparsers.add_parser(
         'gen',
         help='生成字幕文件'
     )
-    gen_parser.add_argument('video', help='输入视频文件路径')
+    gen_parser.add_argument('video', help='输入视频或音频文件路径')
     gen_parser.add_argument('-o', '--output', help='输出目录（默认：项目根目录）')
 
     # 3. resume - 编辑字幕后继续处理
@@ -91,17 +91,25 @@ def print_warning(message: str):
     print(f"⚠️  {message}")
 
 
+def validate_media_file(file_path: str) -> Path:
+    """验证视频或音频文件"""
+    media_file = Path(file_path)
+    if not media_file.exists():
+        raise FileNotFoundError(f"文件不存在: {file_path}")
+
+    video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv'}
+    audio_extensions = {'.wav', '.mp3', '.m4a', '.flac', '.aac', '.ogg', '.wma'}
+    valid_extensions = video_extensions | audio_extensions
+
+    if media_file.suffix.lower() not in valid_extensions:
+        raise ValueError(f"不支持的文件格式: {media_file.suffix}。支持的格式：视频({', '.join(video_extensions)})，音频({', '.join(audio_extensions)})")
+
+    return media_file
+
+
 def validate_video_file(video_path: str) -> Path:
-    """验证视频文件"""
-    video = Path(video_path)
-    if not video.exists():
-        raise FileNotFoundError(f"视频文件不存在: {video_path}")
-    
-    valid_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv'}
-    if video.suffix.lower() not in valid_extensions:
-        raise ValueError(f"不支持的视频格式: {video.suffix}")
-    
-    return video
+    """验证视频文件（保持向后兼容）"""
+    return validate_media_file(video_path)
 
 
 def validate_subtitle_file(subtitle_path: str) -> Path:
@@ -136,8 +144,11 @@ def cmd_auto(args):
         )
 
         print_success("处理完成!")
-        print_info(f"带字幕视频: {final_with_sub}")
-        print_info(f"无字幕视频: {final_no_sub}")
+        if final_no_sub:  # 视频文件
+            print_info(f"带字幕视频: {final_with_sub}")
+            print_info(f"无字幕视频: {final_no_sub}")
+        else:  # 音频文件
+            print_info(f"剪辑音频: {final_with_sub}")
         print_info(f"字幕文件: {final_srt}")
 
     except Exception as e:
@@ -183,8 +194,11 @@ def cmd_resume(args):
         )
 
         print_success("处理完成!")
-        print_info(f"带字幕视频: {final_with_sub}")
-        print_info(f"无字幕视频: {final_no_sub}")
+        if final_no_sub:  # 视频文件
+            print_info(f"带字幕视频: {final_with_sub}")
+            print_info(f"无字幕视频: {final_no_sub}")
+        else:  # 音频文件
+            print_info(f"剪辑音频: {final_with_sub}")
         print_info(f"字幕文件: {final_srt}")
 
     except Exception as e:
@@ -210,7 +224,12 @@ def cmd_status(args):
                 with open(latest_log, 'r', encoding='utf-8') as f:
                     log_data = json.load(f)
                     print_info(f"项目名称: {log_data.get('name', 'N/A')}")
-                    print_info(f"原始视频: {log_data.get('raw_video', 'N/A')}")
+                    # 兼容新旧日志格式
+                    if 'raw_file' in log_data:
+                        file_type = log_data.get('file_type', 'unknown')
+                        print_info(f"原始文件: {log_data.get('raw_file', 'N/A')} ({file_type})")
+                    else:
+                        print_info(f"原始视频: {log_data.get('raw_video', 'N/A')}")
                     print_info(f"创建时间: {log_data.get('timestamp', 'N/A')}")
             else:
                 print_info("没有找到活动的处理任务")

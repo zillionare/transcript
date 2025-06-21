@@ -5,14 +5,14 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "transcript",
+            "name": "gen",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/transcript/transcript.py",
+            "program": "${workspaceFolder}/transcript/cli.py",
             "console": "integratedTerminal",
             "args": [
-                "transcript",
-                "/tmp/academy-intro.mp4"
+                "gen",
+                "/tmp/6月21日.mp4"
             ]
         }
     ]

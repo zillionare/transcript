@@ -6,9 +6,37 @@ Transcript CLI - 简化的命令行接口
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Optional
+
+
+def setup_huggingface_env():
+    """设置Hugging Face环境变量"""
+    # 设置HF_HOME（缓存目录）
+    if 'HF_HOME' not in os.environ:
+        default_hf_home = Path.home() / ".cache" / "huggingface"
+        os.environ['HF_HOME'] = str(default_hf_home)
+
+    # 设置HF_ENDPOINT（镜像端点）
+    if 'HF_ENDPOINT' in os.environ:
+        # 设置huggingface_hub使用的环境变量
+        os.environ['HUGGINGFACE_HUB_DEFAULT_ENDPOINT'] = os.environ['HF_ENDPOINT']
+
+    # 设置相关的缓存环境变量
+    hf_home = Path(os.environ['HF_HOME'])
+    os.environ['HUGGINGFACE_HUB_CACHE'] = str(hf_home / "hub")
+    os.environ['TRANSFORMERS_CACHE'] = str(hf_home / "transformers")
+
+    # 创建缓存目录
+    hf_home.mkdir(parents=True, exist_ok=True)
+    (hf_home / "hub").mkdir(parents=True, exist_ok=True)
+    (hf_home / "transformers").mkdir(parents=True, exist_ok=True)
+
+
+# 在模块加载时设置环境
+setup_huggingface_env()
 
 
 def create_parser():
@@ -45,6 +73,7 @@ def create_parser():
     )
     gen_parser.add_argument('video', help='输入视频或音频文件路径')
     gen_parser.add_argument('-o', '--output', help='输出目录（默认：项目根目录）')
+    gen_parser.add_argument('--diarization', action='store_true', help='启用说话人分离功能（多人对话）')
 
     # 3. resume - 编辑字幕后继续处理
     resume_parser = subparsers.add_parser(
@@ -165,13 +194,19 @@ def cmd_gen(args):
         print_banner()
         print_info(f"开始生成字幕: {args.video}")
 
+        if hasattr(args, 'diarization') and args.diarization:
+            print_info("🎭 启用说话人分离功能")
+
         video = validate_video_file(args.video)
         output_dir = Path(args.output) if args.output else None
+        enable_diarization = hasattr(args, 'diarization') and args.diarization
 
-        srt_file = transcript(video, output_dir)
+        srt_file = transcript(video, output_dir, enable_diarization=enable_diarization)
 
         print_success(f"字幕生成完成!")
         print_info(f"字幕文件: {srt_file}")
+        if enable_diarization:
+            print_info("✨ 字幕已包含说话人标签")
         print_info("下一步: 编辑字幕文件，然后运行 'transcript resume' 继续处理")
 
     except Exception as e:

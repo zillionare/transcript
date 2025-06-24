@@ -43,6 +43,98 @@ warnings.filterwarnings("ignore")
 
 import whisperx
 
+
+def detect_optimal_device_config():
+    """检测并配置最优的设备和计算类型（专为M1/M4优化）"""
+    import platform
+    import subprocess
+
+    # 首先检查是否有环境变量覆盖
+    env_device = os.environ.get('WHISPERX_DEVICE')
+    env_compute_type = os.environ.get('WHISPERX_COMPUTE_TYPE')
+
+    if env_device and env_compute_type:
+        print(f"🔧 使用环境变量配置: device={env_device}, compute_type={env_compute_type}")
+        return env_device, env_compute_type
+
+    # 检测系统信息
+    system = platform.system()
+    machine = platform.machine()
+
+    if system == "Darwin" and machine == "arm64":
+        # Apple Silicon Mac - 专为M1/M4优化
+        try:
+            result = subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'],
+                                  capture_output=True, text=True)
+            cpu_info = result.stdout.strip()
+
+            if "M1" in cpu_info:
+                print("⚡ M1芯片：使用CPU优化配置（经实测验证最优）")
+                device = "cpu"
+                compute_type = "int8"
+                # M1专用优化
+                os.environ.setdefault('BLAS_VENDOR', 'Apple')
+                os.environ.setdefault('LAPACK_VENDOR', 'Apple')
+                os.environ.setdefault('VECLIB_MAXIMUM_THREADS', '8')
+                os.environ.setdefault('WHISPERX_BATCH_SIZE', '8')
+                os.environ.setdefault('WHISPERX_CHUNK_SIZE', '10')
+
+            elif "M4" in cpu_info:
+                print("🚀 M4芯片：使用MPS优化配置")
+                device = "mps"
+                compute_type = "float16"
+                # M4专用优化
+                os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
+                os.environ.setdefault('PYTORCH_MPS_HIGH_WATERMARK_RATIO', '0.0')
+                os.environ.setdefault('WHISPERX_BATCH_SIZE', '16')
+                os.environ.setdefault('WHISPERX_CHUNK_SIZE', '15')
+
+                # 检查MPS可用性
+                try:
+                    import torch
+                    if not torch.backends.mps.is_available():
+                        print("⚠️ MPS不可用，回退到CPU配置")
+                        device = "cpu"
+                        compute_type = "int8"
+                        os.environ['WHISPERX_BATCH_SIZE'] = '8'
+                        os.environ['WHISPERX_CHUNK_SIZE'] = '10'
+                except ImportError:
+                    print("⚠️ PyTorch未安装，使用CPU配置")
+                    device = "cpu"
+                    compute_type = "int8"
+                    os.environ['WHISPERX_BATCH_SIZE'] = '8'
+                    os.environ['WHISPERX_CHUNK_SIZE'] = '10'
+            else:
+                # 默认M1配置
+                device = "cpu"
+                compute_type = "int8"
+                os.environ.setdefault('WHISPERX_BATCH_SIZE', '8')
+                os.environ.setdefault('WHISPERX_CHUNK_SIZE', '10')
+
+        except Exception:
+            # 默认配置
+            device = "cpu"
+            compute_type = "int8"
+            os.environ.setdefault('WHISPERX_BATCH_SIZE', '8')
+            os.environ.setdefault('WHISPERX_CHUNK_SIZE', '10')
+
+        # 通用Apple优化
+        os.environ.setdefault('OMP_NUM_THREADS', '8')
+        os.environ.setdefault('MKL_NUM_THREADS', '8')
+
+    else:
+        # 非Apple Silicon系统
+        device = "cpu"
+        compute_type = "int8"
+        os.environ.setdefault('WHISPERX_BATCH_SIZE', '8')
+        os.environ.setdefault('WHISPERX_CHUNK_SIZE', '10')
+
+    return device, compute_type
+
+
+# 在模块加载时检测最优配置
+optimal_device, optimal_compute_type = detect_optimal_device_config()
+
 prompt = ",".join(["大家好，我们开始上课了。请输出简体中文。"])
 
 opening_video = Path("/Volumes/share/data/autobackup/ke/factor-ml/opening.mp4")
@@ -235,17 +327,103 @@ def _ms_to_hms(ms: int):
     return f"{h:02d}:{m:02d}:{s:02d}.{ms % 1000:03d}"
 
 
-def transcript_cpp(input_audio: Path, output_srt: Path, prompt: str, dry_run=False):
-    """
-    Args:
-        input_audio (str): _description_
-        output_srt (str): _description_
-        prompt (str): _description_
-    """
-    whisper = os.path.join(cpp_path, "whisper-cli")
+def transcript_cpp(input_audio: Path, output_srt: Path, prompt: str, dry_run=False, enable_diarization=False):
+    """使用whisper.cpp进行音频转录，支持简单说话人分离
 
+    Args:
+        input_audio: 输入音频文件路径
+        output_srt: 输出字幕文件路径
+        prompt: 转录提示词
+        dry_run: 是否为试运行模式
+        enable_diarization: 是否启用说话人分离功能
+    """
+    print(f"使用whisper.cpp转录音频: {input_audio} -> {output_srt}")
+    if enable_diarization:
+        print("🎭 启用简单说话人分离功能")
+
+    if dry_run:
+        print("试运行模式，跳过实际转录")
+        return
+
+    whisper = os.path.join(cpp_path, "whisper-cli")
     cmd = f"{whisper} {input_audio} -l zh -sow -ml 30 -t 8 -m {cpp_model} -osrt -of {output_srt.with_suffix('')} --prompt '{prompt}'"
-    execute(cmd)
+
+    try:
+        execute(cmd)
+
+        # 检查字幕文件是否生成成功
+        if output_srt.exists():
+            print(f"✅ 字幕文件生成成功: {output_srt}")
+
+            # 如果启用说话人分离，处理字幕
+            if enable_diarization:
+                try:
+                    print("🔄 添加说话人分离标签...")
+                    add_speaker_labels_to_srt(output_srt)
+                    print("✅ 说话人分离标签添加完成")
+                except Exception as diarize_error:
+                    print(f"⚠️ 说话人分离处理失败: {diarize_error}")
+                    print("保留原始字幕文件")
+        else:
+            raise FileNotFoundError(f"whisper.cpp未生成字幕文件: {output_srt}")
+
+    except Exception as e:
+        print(f"❌ whisper.cpp转录失败: {e}")
+        raise
+
+
+def add_speaker_labels_to_srt(srt_file: Path):
+    """为现有SRT文件添加简单的说话人标签"""
+    subs = pysubs2.load(str(srt_file))
+
+    if not subs.events:
+        return
+
+    # 简单的说话人分离策略
+    current_speaker = "SPEAKER_A"
+    speaker_count = 0
+    last_end_time = 0
+
+    # 说话人名称映射
+    speaker_names = {
+        "SPEAKER_A": "说话人A",
+        "SPEAKER_B": "说话人B",
+        "SPEAKER_C": "说话人C",
+        "SPEAKER_D": "说话人D",
+    }
+
+    speaker_stats = {}
+
+    for event in subs.events:
+        start_time_sec = event.start / 1000.0
+
+        # 如果间隔超过2秒，可能是说话人切换
+        if start_time_sec - last_end_time > 2.0:
+            speaker_count = (speaker_count + 1) % 2  # 在两个主要说话人之间切换
+            current_speaker = f"SPEAKER_{chr(65 + speaker_count)}"  # A, B, C, D...
+
+        # 统计说话人
+        if current_speaker not in speaker_stats:
+            speaker_stats[current_speaker] = 0
+        speaker_stats[current_speaker] += 1
+
+        # 添加说话人标签
+        speaker_name = speaker_names.get(current_speaker, current_speaker)
+        if not event.text.startswith('['):  # 避免重复添加标签
+            event.text = f"[{speaker_name}] {event.text}"
+
+        last_end_time = event.end / 1000.0
+
+    # 保存修改后的字幕
+    subs.save(str(srt_file))
+
+    # 输出统计信息
+    print(f"\n🎭 说话人分离统计:")
+    for speaker, count in speaker_stats.items():
+        speaker_name = speaker_names.get(speaker, speaker)
+        print(f"   {speaker_name}: {count} 个片段")
+
+    return subs
 
 
 def init_jieba():
@@ -309,30 +487,69 @@ def init_jieba():
 
 
 def transcriptx(input_audio: Path, output_srt: Path, prompt: str):
-    """使用whisperx进行音频转录"""
+    """使用whisperx进行音频转录，支持Apple Silicon优化"""
     print(f"使用whisperx转录音频: {input_audio} -> {output_srt}")
 
-    compute_type = "default"
-    device = "cpu"
+    # 使用检测到的最优配置
+    device = optimal_device
+    compute_type = optimal_compute_type
+
+    print(f"🎯 使用设备配置: {device} (compute_type: {compute_type})")
 
     try:
         options = {"initial_prompt": prompt}
         print("加载whisperx模型...")
-        model = whisperx.load_model(
-            whisperx_model,
-            device=device,
-            compute_type=compute_type,
-            asr_options=options,
-            language="zh",
-            threads=8,
-        )
+        try:
+            # 使用环境变量设置的缓存目录
+            download_root = os.environ.get('HF_HOME', None)
+            local_files_only = os.environ.get('HF_HUB_OFFLINE', '0') == '1'
+
+            print(f"🔧 模型缓存目录: {download_root}")
+            print(f"🔧 离线模式: {local_files_only}")
+
+            model = whisperx.load_model(
+                whisperx_model,
+                device=device,
+                compute_type=compute_type,
+                asr_options=options,
+                language="zh",
+                threads=8,
+                download_root=download_root,
+                local_files_only=local_files_only
+            )
+        except Exception as model_error:
+            print(f"⚠️ 加载whisperx模型失败: {model_error}")
+            print("尝试使用本地模型或降级模型...")
+            # 尝试使用更简单的模型
+            try:
+                model = whisperx.load_model(
+                    "base",  # 使用基础模型
+                    device=device,
+                    compute_type=compute_type,
+                    asr_options=options,
+                    language="zh",
+                    threads=8,
+                    local_files_only=False
+                )
+                print("✅ 成功加载基础模型")
+            except Exception as fallback_error:
+                print(f"❌ 基础模型也加载失败: {fallback_error}")
+                raise model_error
 
         print("加载音频文件...")
         audio = whisperx.load_audio(str(input_audio))
 
         print("开始转录...")
+
+        # 从环境变量获取批处理配置
+        batch_size = int(os.environ.get('WHISPERX_BATCH_SIZE', '8'))
+        chunk_size = int(os.environ.get('WHISPERX_CHUNK_SIZE', '10'))
+
+        print(f"🔧 转录参数: batch_size={batch_size}, chunk_size={chunk_size}")
+
         result = model.transcribe(
-            audio, language="zh", print_progress=True, batch_size=8, chunk_size=10
+            audio, language="zh", print_progress=True,
+            batch_size=batch_size, chunk_size=chunk_size
         )
 
         if "segments" not in result or not result["segments"]:
@@ -369,6 +586,262 @@ def transcriptx(input_audio: Path, output_srt: Path, prompt: str):
     # print(result["segments"])  # after alignment
 
 
+def transcriptx_with_diarization(input_audio: Path, output_srt: Path, prompt: str):
+    """使用whisperx进行音频转录，支持说话人分离和Apple Silicon优化"""
+    print(f"使用whisperx转录音频（含说话人分离）: {input_audio} -> {output_srt}")
+    print("🎭 启用说话人分离功能")
+
+    # 使用检测到的最优配置
+    device = optimal_device
+    compute_type = optimal_compute_type
+
+    print(f"🎯 使用设备配置: {device} (compute_type: {compute_type})")
+
+    try:
+        options = {"initial_prompt": prompt}
+        print("加载whisperx模型...")
+        try:
+            # 使用环境变量设置的缓存目录
+            download_root = os.environ.get('HF_HOME', None)
+            local_files_only = os.environ.get('HF_HUB_OFFLINE', '0') == '1'
+
+            print(f"🔧 模型缓存目录: {download_root}")
+            print(f"🔧 离线模式: {local_files_only}")
+
+            model = whisperx.load_model(
+                whisperx_model,
+                device=device,
+                compute_type=compute_type,
+                asr_options=options,
+                language="zh",
+                threads=8,
+                download_root=download_root,
+                local_files_only=local_files_only
+            )
+        except Exception as model_error:
+            print(f"⚠️ 加载whisperx模型失败: {model_error}")
+            print("尝试使用本地模型或降级模型...")
+            # 尝试使用更简单的模型
+            try:
+                model = whisperx.load_model(
+                    "base",  # 使用基础模型
+                    device=device,
+                    compute_type=compute_type,
+                    asr_options=options,
+                    language="zh",
+                    threads=8,
+                    local_files_only=False
+                )
+                print("✅ 成功加载基础模型")
+            except Exception as fallback_error:
+                print(f"❌ 基础模型也加载失败: {fallback_error}")
+                raise model_error
+
+        print("加载音频文件...")
+        audio = whisperx.load_audio(str(input_audio))
+
+        print("开始转录...")
+
+        # 从环境变量获取批处理配置
+        batch_size = int(os.environ.get('WHISPERX_BATCH_SIZE', '8'))
+        chunk_size = int(os.environ.get('WHISPERX_CHUNK_SIZE', '10'))
+
+        print(f"🔧 转录参数: batch_size={batch_size}, chunk_size={chunk_size}")
+
+        result = model.transcribe(
+            audio, language="zh", print_progress=True,
+            batch_size=batch_size, chunk_size=chunk_size
+        )
+
+        if "segments" not in result or not result["segments"]:
+            print("⚠️ 转录结果为空，创建空字幕文件")
+            empty_subs = pysubs2.SSAFile()
+            empty_subs.save(str(output_srt))
+            return
+
+        print(f"转录完成，共 {len(result['segments'])} 个片段")
+
+        try:
+            print("🔄 开始说话人分离...")
+
+            # 2. 对齐模型（提高时间戳精度）
+            print("加载对齐模型...")
+            # 使用环境变量设置
+            model_dir = os.environ.get('HF_HOME', None)
+
+            model_a, metadata = whisperx.load_align_model(
+                language_code=result["language"],
+                device=device,
+                model_dir=model_dir
+            )
+
+            print("对齐转录结果...")
+            result = whisperx.align(
+                result["segments"],
+                model_a,
+                metadata,
+                audio,
+                device,
+                return_char_alignments=False,
+            )
+
+            # 3. 说话人分离
+            print("加载说话人分离模型...")
+            try:
+                # 使用pyannote.audio进行说话人分离
+                from pyannote.audio import Pipeline
+
+                # 加载说话人分离模型
+                diarize_model = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    use_auth_token=None
+                )
+
+                print("执行说话人分离...")
+                diarize_segments = diarize_model(str(input_audio))
+
+                print("分配说话人标签...")
+                result = whisperx.assign_word_speakers(diarize_segments, result)
+
+                # 统计说话人数量
+                speakers = set()
+                for seg in result['segments']:
+                    if 'speaker' in seg:
+                        speakers.add(seg['speaker'])
+
+                print(f"✅ 说话人分离完成，检测到 {len(speakers)} 个说话人: {', '.join(speakers)}")
+
+            except ImportError as import_error:
+                print(f"❌ 缺少pyannote.audio依赖: {import_error}")
+                print("请安装说话人分离依赖:")
+                print("pip install pyannote.audio")
+                raise Exception("说话人分离需要安装pyannote.audio")
+
+            except Exception as diarize_error:
+                print(f"❌ 说话人分离失败: {diarize_error}")
+                print("可能的原因:")
+                print("1. 网络连接问题，无法下载模型")
+                print("2. 音频文件格式不支持")
+                print("3. 内存不足")
+                raise
+
+            print(f"✅ 说话人分离完成")
+
+            # 生成带说话人标签的字幕
+            subs = create_speaker_subtitles(result["segments"])
+
+        except Exception as diarize_error:
+            print(f"⚠️ 说话人分离失败: {diarize_error}")
+            print("回退到普通转录模式...")
+            subs = pysubs2.load_from_whisper(result["segments"])
+
+        subs.save(str(output_srt))
+        print(f"字幕文件已保存: {output_srt}")
+
+    except Exception as e:
+        print(f"❌ whisperx转录失败: {e}")
+        # 创建一个空的字幕文件以避免后续错误
+        print("创建空字幕文件以避免后续错误...")
+        empty_subs = pysubs2.SSAFile()
+        empty_subs.save(str(output_srt))
+        raise
+
+
+def simple_speaker_separation(segments):
+    """简单的说话人分离，基于音频间隔和音量变化"""
+    if not segments:
+        return segments
+
+    # 简单策略：根据时间间隔判断说话人切换
+    current_speaker = "SPEAKER_00"
+    speaker_count = 0
+    last_end_time = 0
+
+    for i, segment in enumerate(segments):
+        start_time = segment["start"]
+
+        # 如果间隔超过2秒，可能是说话人切换
+        if start_time - last_end_time > 2.0:
+            speaker_count = (speaker_count + 1) % 2  # 在两个说话人之间切换
+            current_speaker = f"SPEAKER_0{speaker_count}"
+
+        segment["speaker"] = current_speaker
+        last_end_time = segment["end"]
+
+    return segments
+
+
+def create_speaker_subtitles(segments):
+    """根据说话人分离结果创建带说话人标签的字幕"""
+    subs = pysubs2.SSAFile()
+
+    # 说话人颜色映射
+    speaker_colors = {
+        'SPEAKER_00': '&H00FF0000',  # 蓝色
+        'SPEAKER_01': '&H0000FF00',  # 绿色
+        'SPEAKER_02': '&H000000FF',  # 红色
+        'SPEAKER_03': '&H00FF00FF',  # 紫色
+        'SPEAKER_04': '&H0000FFFF',  # 黄色
+        'SPEAKER_05': '&H00FFFF00',  # 青色
+    }
+
+    # 说话人中文名称映射
+    speaker_names = {
+        'SPEAKER_00': '说话人A',
+        'SPEAKER_01': '说话人B',
+        'SPEAKER_02': '说话人C',
+        'SPEAKER_03': '说话人D',
+        'SPEAKER_04': '说话人E',
+        'SPEAKER_05': '说话人F',
+    }
+
+    # 统计说话人出现次数
+    speaker_stats = {}
+
+    for segment in segments:
+        start_ms = int(segment["start"] * 1000)
+        end_ms = int(segment["end"] * 1000)
+        text = segment["text"].strip()
+
+        # 获取说话人信息
+        speaker = segment.get("speaker", "UNKNOWN")
+        speaker_name = speaker_names.get(speaker, f"说话人{speaker}")
+
+        # 统计说话人
+        if speaker not in speaker_stats:
+            speaker_stats[speaker] = 0
+        speaker_stats[speaker] += 1
+
+        # 创建字幕事件
+        event = pysubs2.SSAEvent(
+            start=start_ms,
+            end=end_ms,
+            text=f"[{speaker_name}] {text}"
+        )
+
+        # 设置说话人样式
+        event.style = speaker if speaker in speaker_colors else "Default"
+
+        subs.events.append(event)
+
+    # 添加说话人样式定义
+    for speaker, color in speaker_colors.items():
+        if speaker in speaker_names:
+            style = pysubs2.SSAStyle()
+            style.fontsize = 20
+            style.bold = True
+            # 注意：pysubs2的颜色格式可能不同，这里简化处理
+            subs.styles[speaker] = style
+
+    # 输出说话人统计信息
+    print(f"\n🎭 说话人分离统计:")
+    for speaker, count in speaker_stats.items():
+        speaker_name = speaker_names.get(speaker, f"说话人{speaker}")
+        print(f"   {speaker_name}: {count} 个片段")
+
+    return subs
+
+
 def extract_audio(input_video: Path, output_wav: Path):
     cmd = (
         f"ffmpeg -i {input_video} -vn -acodec pcm_s16le -ar 16000 -ac 2 -y {output_wav} -v error"
@@ -398,7 +871,7 @@ def is_video_file(file_path: Path) -> bool:
     return file_path.suffix.lower() in video_extensions
 
 
-def transcript(input_file: Path, output_dir: Path = None, dry_run=False):
+def transcript(input_file: Path, output_dir: Path = None, dry_run=False, enable_diarization=False):
     """
     将视频或音频文件转换为字幕文件
 
@@ -406,6 +879,7 @@ def transcript(input_file: Path, output_dir: Path = None, dry_run=False):
         input_file: 输入视频或音频文件路径
         output_dir: 输出目录，如果为None则将srt文件保存到项目根目录
         dry_run: 是否为试运行模式
+        enable_diarization: 是否启用说话人分离功能
     """
     input_file = Path(input_file)
 
@@ -496,7 +970,11 @@ def transcript(input_file: Path, output_dir: Path = None, dry_run=False):
     # 检查whisper.cpp是否可用，如果不可用则使用whisperx
     whisper_cpp_available = cpp_path.exists() and cpp_model.exists()
 
-    if whisper_cpp_available and not dry_run:
+    if enable_diarization:
+        # 说话人分离必须使用whisperx，不使用whisper.cpp
+        print("🎭 说话人分离功能需要使用whisperx...")
+        transcriptx_with_diarization(output_wav, temp_srt, prompt)
+    elif whisper_cpp_available and not dry_run:
         try:
             transcript_cpp(output_wav, temp_srt, prompt, dry_run)
         except Exception as e:

@@ -5,3 +5,14 @@ venv/
 env/
 .venv/
 .env/
+
+# 环境配置文件
+.env
+
+# 生成的字幕文件
+*.srt
+*-speakers.txt
+
+# 临时文件
+*_transcription.wav
+*_alignment.wav

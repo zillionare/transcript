@@ -6,9 +6,37 @@ Transcript CLI - 简化的命令行接口
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Optional
+
+
+def setup_huggingface_env():
+    """设置Hugging Face环境变量"""
+    # 设置HF_HOME（缓存目录）
+    if 'HF_HOME' not in os.environ:
+        default_hf_home = Path.home() / ".cache" / "huggingface"
+        os.environ['HF_HOME'] = str(default_hf_home)
+
+    # 设置HF_ENDPOINT（镜像端点）
+    if 'HF_ENDPOINT' in os.environ:
+        # 设置huggingface_hub使用的环境变量
+        os.environ['HUGGINGFACE_HUB_DEFAULT_ENDPOINT'] = os.environ['HF_ENDPOINT']
+
+    # 设置相关的缓存环境变量
+    hf_home = Path(os.environ['HF_HOME'])
+    os.environ['HUGGINGFACE_HUB_CACHE'] = str(hf_home / "hub")
+    os.environ['TRANSFORMERS_CACHE'] = str(hf_home / "transformers")
+
+    # 创建缓存目录
+    hf_home.mkdir(parents=True, exist_ok=True)
+    (hf_home / "hub").mkdir(parents=True, exist_ok=True)
+    (hf_home / "transformers").mkdir(parents=True, exist_ok=True)
+
+
+# 在模块加载时设置环境
+setup_huggingface_env()
 
 
 def create_parser():
@@ -163,19 +191,23 @@ def cmd_gen(args):
         from .transcript import transcript
 
         print_banner()
-        print_info(f"开始生成字幕: {args.video}")
+        print_info(f"开始生成转录文件: {args.video}")
+        print_info("🎭 自动启用说话人分离功能")
 
         video = validate_video_file(args.video)
         output_dir = Path(args.output) if args.output else None
 
-        srt_file = transcript(video, output_dir)
+        # 现在transcript函数返回两个文件
+        srt_file, speaker_txt = transcript(video, output_dir, enable_diarization=True)
 
-        print_success(f"字幕生成完成!")
-        print_info(f"字幕文件: {srt_file}")
-        print_info("下一步: 编辑字幕文件，然后运行 'transcript resume' 继续处理")
+        print_success(f"转录文件生成完成!")
+        print_info(f"SRT字幕文件（无说话人标识）: {srt_file}")
+        print_info(f"文本文件（含说话人标识）: {speaker_txt}")
+        print_info("✨ 已自动生成两个版本的转录文件")
+        print_info("下一步: 编辑SRT字幕文件，然后运行 'transcript resume' 继续处理")
 
     except Exception as e:
-        print_error(f"生成字幕失败: {e}")
+        print_error(f"生成转录文件失败: {e}")
         sys.exit(1)
 
 

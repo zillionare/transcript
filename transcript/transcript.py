@@ -143,8 +143,9 @@ ending_video = Path("/Volumes/share/data/autobackup/ke/factor-ml/end.mp4")
 
 cpp_path = Path("/Volumes/share/data/whisper.cpp")
 cpp_model = Path("/Volumes/share/data/whisper.cpp/models/ggml-large-v2.bin")
-# 设置本地模型目录，如果环境变量未设置则使用默认路径
-model_dir = os.environ.get("hf_model_dir", "/Volumes/share/data/models/huggingface/hub")
+# 使用HF_HOME环境变量设置模型缓存目录
+hf_home = os.environ.get("HF_HOME", "/Volumes/share/data/models/huggingface")
+model_dir = os.path.join(hf_home, "hub")
 
 # 设置whisperx模型名称
 whisperx_model = "large-v2"  # 支持中文的whisper模型
@@ -220,7 +221,7 @@ def align_subtitles_with_audio(video: Path, original_srt: Path, aligned_srt: Pat
         print("加载对齐模型...")
         model_name = None
 
-        # 尝试使用本地路径
+        # 尝试使用HF_HOME缓存路径
         local_model_path = Path(model_dir) / "models--jonatasgrosman--wav2vec2-large-xlsr-53-chinese-zh-cn"
         if local_model_path.exists():
             snapshots_dir = local_model_path / "snapshots"
@@ -236,11 +237,12 @@ def align_subtitles_with_audio(video: Path, original_srt: Path, aligned_srt: Pat
             print(f"使用默认模型名称: {model_name}")
 
         try:
+            # 使用HF_HOME作为缓存目录
             model_a, metadata = whisperx.load_align_model(
                 language_code="zh",
                 device=device,
                 model_name=model_name,
-                model_dir=model_dir
+                model_dir=hf_home
             )
             print("对齐模型加载成功，开始对齐...")
         except Exception as model_error:
@@ -348,6 +350,7 @@ def transcript_cpp(input_audio: Path, output_srt: Path, prompt: str, dry_run=Fal
     except Exception as e:
         print(f"❌ whisper.cpp转录失败: {e}")
         raise
+
 
 
 def create_speaker_text_file(srt_file: Path, output_txt: Path):
@@ -502,8 +505,8 @@ def transcriptx(input_audio: Path, output_srt: Path, prompt: str):
         options = {"initial_prompt": prompt}
         print("加载whisperx模型...")
         try:
-            # 使用环境变量设置的缓存目录
-            download_root = os.environ.get('HF_HOME', None)
+            # 使用HF_HOME环境变量设置的缓存目录
+            download_root = hf_home
             local_files_only = os.environ.get('HF_HUB_OFFLINE', '0') == '1'
 
             print(f"🔧 模型缓存目录: {download_root}")
@@ -603,8 +606,8 @@ def transcriptx_with_diarization(input_audio: Path, output_srt: Path, prompt: st
         options = {"initial_prompt": prompt}
         print("加载whisperx模型...")
         try:
-            # 使用环境变量设置的缓存目录
-            download_root = os.environ.get('HF_HOME', None)
+            # 使用HF_HOME环境变量设置的缓存目录
+            download_root = hf_home
             local_files_only = os.environ.get('HF_HUB_OFFLINE', '0') == '1'
 
             print(f"🔧 模型缓存目录: {download_root}")
@@ -2039,6 +2042,7 @@ def test():
     """测试模型加载功能"""
     import os
     print("HF_ENDPOINT:", os.environ.get("HF_ENDPOINT"))
+    print("HF_HOME:", hf_home)
     print("Model directory:", model_dir)
 
     # 设置离线模式
@@ -2071,7 +2075,7 @@ def test():
             language_code="zh",
             device=device,
             model_name=model_name,
-            model_dir=model_dir
+            model_dir=hf_home
         )
         print("✅ Model loaded successfully!")
         print(f"Model type: {type(model_a)}")

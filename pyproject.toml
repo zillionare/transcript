@@ -12,7 +12,10 @@ dependencies = [
     "opencc (>=1.1.9,<2.0.0)",
     "pysubs2 (>=1.8.0,<2.0.0)",
     "pyyaml (>=6.0,<7.0)",
-    "whisperx (>=3.3.4,<4.0.0)"
+    "whisperx (>=3.3.4,<4.0.0)",
+    "torch (>=2.0.0)",
+    "torchvision (>=0.15.0)",
+    "torchaudio (>=2.0.0)"
 ]
 
 [project.scripts]

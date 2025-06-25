@@ -79,31 +79,21 @@ def detect_optimal_device_config():
                 os.environ.setdefault('WHISPERX_BATCH_SIZE', '8')
                 os.environ.setdefault('WHISPERX_CHUNK_SIZE', '10')
 
-            elif "M4" in cpu_info:
-                print("🚀 M4芯片：使用MPS优化配置")
-                device = "mps"
-                compute_type = "float16"
+            elif "M4" in cpu_info or "M3" in cpu_info or "M2" in cpu_info:
+                print("⚡ M4/M3/M2芯片：使用CPU优化配置（推荐）")
+                device = "cpu"
+                compute_type = "int8"
                 # M4专用优化
-                os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
-                os.environ.setdefault('PYTORCH_MPS_HIGH_WATERMARK_RATIO', '0.0')
+                os.environ.setdefault('BLAS_VENDOR', 'Apple')
+                os.environ.setdefault('LAPACK_VENDOR', 'Apple')
+                os.environ.setdefault('VECLIB_MAXIMUM_THREADS', '12')
                 os.environ.setdefault('WHISPERX_BATCH_SIZE', '16')
                 os.environ.setdefault('WHISPERX_CHUNK_SIZE', '15')
 
-                # 检查MPS可用性
-                try:
-                    import torch
-                    if not torch.backends.mps.is_available():
-                        print("⚠️ MPS不可用，回退到CPU配置")
-                        device = "cpu"
-                        compute_type = "int8"
-                        os.environ['WHISPERX_BATCH_SIZE'] = '8'
-                        os.environ['WHISPERX_CHUNK_SIZE'] = '10'
-                except ImportError:
-                    print("⚠️ PyTorch未安装，使用CPU配置")
-                    device = "cpu"
-                    compute_type = "int8"
-                    os.environ['WHISPERX_BATCH_SIZE'] = '8'
-                    os.environ['WHISPERX_CHUNK_SIZE'] = '10'
+                # 强制禁用MPS，因为WhisperX对MPS支持不完整
+                print("⚠️ 强制禁用MPS设备，使用CPU以确保兼容性")
+                os.environ['CUDA_VISIBLE_DEVICES'] = ''  # 禁用CUDA
+                os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'  # 启用MPS回退
             else:
                 # 默认M1配置
                 device = "cpu"
@@ -132,8 +122,18 @@ def detect_optimal_device_config():
     return device, compute_type
 
 
+# 强制禁用MPS以确保WhisperX兼容性
+os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.0'
+
 # 在模块加载时检测最优配置
 optimal_device, optimal_compute_type = detect_optimal_device_config()
+
+# 再次确保设备配置为CPU（防止任何MPS相关问题）
+if optimal_device == "mps":
+    print("⚠️ 检测到MPS设备配置，强制切换到CPU以确保兼容性")
+    optimal_device = "cpu"
+    optimal_compute_type = "int8"
 
 prompt = ",".join(["大家好，我们开始上课了。请输出简体中文。"])
 
@@ -426,6 +426,84 @@ def add_speaker_labels_to_srt(srt_file: Path):
     return subs
 
 
+def create_speaker_text_file(srt_file: Path, output_txt: Path):
+    """
+    从SRT文件创建带说话人标识的普通文本文件
+
+    Args:
+        srt_file: 输入的SRT字幕文件
+        output_txt: 输出的文本文件路径
+    """
+    try:
+        subs = pysubs2.load(str(srt_file))
+
+        with open(output_txt, 'w', encoding='utf-8') as f:
+            for event in subs.events:
+                text = event.text.strip()
+                if text:
+                    # 检查是否已经包含说话人标识
+                    if text.startswith('[') and ']' in text:
+                        # 已经有说话人标识，直接写入
+                        f.write(f"{text}\n")
+                    else:
+                        # 没有说话人标识，添加默认标识
+                        f.write(f"[说话人] {text}\n")
+
+        print(f"✅ 带说话人标识的文本文件已生成: {output_txt}")
+
+    except Exception as e:
+        print(f"❌ 生成带说话人标识文本文件失败: {e}")
+        # 创建一个空文件以避免后续错误
+        with open(output_txt, 'w', encoding='utf-8') as f:
+            f.write("")
+
+
+def create_clean_srt_file(srt_file: Path, output_srt: Path):
+    """
+    从带说话人标识的SRT文件创建不带说话人标识的干净SRT文件
+
+    Args:
+        srt_file: 输入的SRT字幕文件（可能包含说话人标识）
+        output_srt: 输出的干净SRT文件路径
+    """
+    try:
+        subs = pysubs2.load(str(srt_file))
+        clean_subs = pysubs2.SSAFile()
+
+        for event in subs.events:
+            text = event.text.strip()
+            if text:
+                # 移除说话人标识
+                if text.startswith('[') and ']' in text:
+                    # 找到第一个']'的位置
+                    bracket_end = text.find(']')
+                    if bracket_end != -1:
+                        # 提取说话人标识后的内容
+                        clean_text = text[bracket_end + 1:].strip()
+                    else:
+                        clean_text = text
+                else:
+                    clean_text = text
+
+                # 创建新的事件
+                if clean_text:
+                    new_event = pysubs2.SSAEvent(
+                        start=event.start,
+                        end=event.end,
+                        text=clean_text
+                    )
+                    clean_subs.events.append(new_event)
+
+        clean_subs.save(str(output_srt))
+        print(f"✅ 干净的SRT文件已生成: {output_srt}")
+
+    except Exception as e:
+        print(f"❌ 生成干净SRT文件失败: {e}")
+        # 复制原文件作为备选方案
+        import shutil
+        shutil.copy2(srt_file, output_srt)
+
+
 def init_jieba():
     """
     初始化jieba分词器并加载自定义词典
@@ -685,37 +763,17 @@ def transcriptx_with_diarization(input_audio: Path, output_srt: Path, prompt: st
                 return_char_alignments=False,
             )
 
-            # 3. 说话人分离
+            # 3. 说话人分离 - 使用SpeechBrain替代PyAnnote
             print("加载说话人分离模型...")
             try:
-                # 使用pyannote.audio进行说话人分离
-                from pyannote.audio import Pipeline
-
-                # 加载说话人分离模型
-                diarize_model = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
-                    use_auth_token=None
-                )
-
-                print("执行说话人分离...")
-                diarize_segments = diarize_model(str(input_audio))
-
-                print("分配说话人标签...")
-                result = whisperx.assign_word_speakers(diarize_segments, result)
-
-                # 统计说话人数量
-                speakers = set()
-                for seg in result['segments']:
-                    if 'speaker' in seg:
-                        speakers.add(seg['speaker'])
-
-                print(f"✅ 说话人分离完成，检测到 {len(speakers)} 个说话人: {', '.join(speakers)}")
+                # 使用SpeechBrain进行说话人分离
+                subs = speechbrain_speaker_diarization(result["segments"], audio, input_audio)
 
             except ImportError as import_error:
-                print(f"❌ 缺少pyannote.audio依赖: {import_error}")
+                print(f"❌ 缺少SpeechBrain依赖: {import_error}")
                 print("请安装说话人分离依赖:")
-                print("pip install pyannote.audio")
-                raise Exception("说话人分离需要安装pyannote.audio")
+                print("pip install speechbrain")
+                raise Exception("说话人分离需要安装speechbrain")
 
             except Exception as diarize_error:
                 print(f"❌ 说话人分离失败: {diarize_error}")
@@ -725,14 +783,9 @@ def transcriptx_with_diarization(input_audio: Path, output_srt: Path, prompt: st
                 print("3. 内存不足")
                 raise
 
-            print(f"✅ 说话人分离完成")
-
-            # 生成带说话人标签的字幕
-            subs = create_speaker_subtitles(result["segments"])
-
         except Exception as diarize_error:
             print(f"⚠️ 说话人分离失败: {diarize_error}")
-            print("回退到普通转录模式...")
+            print("回退到普通转录模式（不含说话人分离）...")
             subs = pysubs2.load_from_whisper(result["segments"])
 
         subs.save(str(output_srt))
@@ -747,99 +800,7 @@ def transcriptx_with_diarization(input_audio: Path, output_srt: Path, prompt: st
         raise
 
 
-def simple_speaker_separation(segments):
-    """简单的说话人分离，基于音频间隔和音量变化"""
-    if not segments:
-        return segments
 
-    # 简单策略：根据时间间隔判断说话人切换
-    current_speaker = "SPEAKER_00"
-    speaker_count = 0
-    last_end_time = 0
-
-    for i, segment in enumerate(segments):
-        start_time = segment["start"]
-
-        # 如果间隔超过2秒，可能是说话人切换
-        if start_time - last_end_time > 2.0:
-            speaker_count = (speaker_count + 1) % 2  # 在两个说话人之间切换
-            current_speaker = f"SPEAKER_0{speaker_count}"
-
-        segment["speaker"] = current_speaker
-        last_end_time = segment["end"]
-
-    return segments
-
-
-def create_speaker_subtitles(segments):
-    """根据说话人分离结果创建带说话人标签的字幕"""
-    subs = pysubs2.SSAFile()
-
-    # 说话人颜色映射
-    speaker_colors = {
-        'SPEAKER_00': '&H00FF0000',  # 蓝色
-        'SPEAKER_01': '&H0000FF00',  # 绿色
-        'SPEAKER_02': '&H000000FF',  # 红色
-        'SPEAKER_03': '&H00FF00FF',  # 紫色
-        'SPEAKER_04': '&H0000FFFF',  # 黄色
-        'SPEAKER_05': '&H00FFFF00',  # 青色
-    }
-
-    # 说话人中文名称映射
-    speaker_names = {
-        'SPEAKER_00': '说话人A',
-        'SPEAKER_01': '说话人B',
-        'SPEAKER_02': '说话人C',
-        'SPEAKER_03': '说话人D',
-        'SPEAKER_04': '说话人E',
-        'SPEAKER_05': '说话人F',
-    }
-
-    # 统计说话人出现次数
-    speaker_stats = {}
-
-    for segment in segments:
-        start_ms = int(segment["start"] * 1000)
-        end_ms = int(segment["end"] * 1000)
-        text = segment["text"].strip()
-
-        # 获取说话人信息
-        speaker = segment.get("speaker", "UNKNOWN")
-        speaker_name = speaker_names.get(speaker, f"说话人{speaker}")
-
-        # 统计说话人
-        if speaker not in speaker_stats:
-            speaker_stats[speaker] = 0
-        speaker_stats[speaker] += 1
-
-        # 创建字幕事件
-        event = pysubs2.SSAEvent(
-            start=start_ms,
-            end=end_ms,
-            text=f"[{speaker_name}] {text}"
-        )
-
-        # 设置说话人样式
-        event.style = speaker if speaker in speaker_colors else "Default"
-
-        subs.events.append(event)
-
-    # 添加说话人样式定义
-    for speaker, color in speaker_colors.items():
-        if speaker in speaker_names:
-            style = pysubs2.SSAStyle()
-            style.fontsize = 20
-            style.bold = True
-            # 注意：pysubs2的颜色格式可能不同，这里简化处理
-            subs.styles[speaker] = style
-
-    # 输出说话人统计信息
-    print(f"\n🎭 说话人分离统计:")
-    for speaker, count in speaker_stats.items():
-        speaker_name = speaker_names.get(speaker, f"说话人{speaker}")
-        print(f"   {speaker_name}: {count} 个片段")
-
-    return subs
 
 
 def extract_audio(input_video: Path, output_wav: Path):
@@ -859,6 +820,170 @@ def cost(start, cmd: str = "", prefix=""):
     )
 
 
+def speechbrain_speaker_diarization(segments, audio, audio_file_path):
+    """
+    使用SpeechBrain进行说话人分离
+
+    Args:
+        segments: WhisperX转录的片段
+        audio: 音频数据
+        audio_file_path: 音频文件路径
+
+    Returns:
+        pysubs2.SSAFile: 带说话人标签的字幕对象
+    """
+    print("🎭 使用SpeechBrain进行说话人分离...")
+
+    try:
+        from speechbrain.inference import SpeakerRecognition
+        import torch
+        import numpy as np
+
+        # 加载说话人识别模型
+        print("加载SpeechBrain说话人识别模型...")
+        verification = SpeakerRecognition.from_hparams(
+            source='speechbrain/spkrec-ecapa-voxceleb',
+            savedir='tmp/spkrec-ecapa-voxceleb'
+        )
+
+        # 为每个片段提取说话人特征
+        print("提取说话人特征...")
+        speaker_embeddings = []
+        valid_segments = []
+
+        for i, segment in enumerate(segments):
+            start_time = segment["start"]
+            end_time = segment["end"]
+
+            # 提取音频片段
+            start_sample = int(start_time * 16000)  # 假设16kHz采样率
+            end_sample = int(end_time * 16000)
+
+            if end_sample > len(audio):
+                end_sample = len(audio)
+            if start_sample >= end_sample:
+                continue
+
+            audio_segment = audio[start_sample:end_sample]
+
+            # 确保音频片段足够长（至少0.5秒）
+            if len(audio_segment) < 8000:  # 0.5秒 * 16000Hz
+                continue
+
+            # 转换为torch tensor
+            audio_tensor = torch.FloatTensor(audio_segment).unsqueeze(0)
+
+            # 提取说话人嵌入
+            try:
+                embedding = verification.encode_batch(audio_tensor)
+                speaker_embeddings.append(embedding.squeeze().cpu().numpy())
+                valid_segments.append(segment)
+            except Exception as e:
+                print(f"⚠️ 片段 {i} 特征提取失败: {e}")
+                continue
+
+        if len(speaker_embeddings) < 2:
+            print("⚠️ 有效音频片段太少，无法进行说话人分离")
+            # 回退到普通字幕
+            return pysubs2.load_from_whisper(segments)
+
+        # 使用聚类算法分离说话人
+        print("执行说话人聚类...")
+        from sklearn.cluster import AgglomerativeClustering
+
+        # 转换为numpy数组
+        embeddings_array = np.array(speaker_embeddings)
+
+        # 自动确定说话人数量（2-4个）
+        best_score = -1
+        best_labels = None
+        best_n_speakers = 2
+
+        for n_speakers in range(2, min(5, len(embeddings_array) + 1)):
+            clustering = AgglomerativeClustering(
+                n_clusters=n_speakers,
+                linkage='ward'
+            )
+            labels = clustering.fit_predict(embeddings_array)
+
+            # 计算轮廓系数作为聚类质量评估
+            from sklearn.metrics import silhouette_score
+            if len(set(labels)) > 1:
+                score = silhouette_score(embeddings_array, labels)
+                if score > best_score:
+                    best_score = score
+                    best_labels = labels
+                    best_n_speakers = n_speakers
+
+        if best_labels is None:
+            print("⚠️ 聚类失败，使用默认分配")
+            best_labels = [i % 2 for i in range(len(valid_segments))]
+            best_n_speakers = 2
+
+        print(f"✅ 检测到 {best_n_speakers} 个说话人，聚类质量分数: {best_score:.3f}")
+
+        # 为片段分配说话人标签
+        speaker_names = {
+            0: '说话人A',
+            1: '说话人B',
+            2: '说话人C',
+            3: '说话人D',
+            4: '说话人E',
+            5: '说话人F'
+        }
+
+        # 统计每个说话人的片段数
+        speaker_stats = {}
+        for label in best_labels:
+            speaker_name = speaker_names.get(label, f'说话人{label}')
+            speaker_stats[speaker_name] = speaker_stats.get(speaker_name, 0) + 1
+
+        print(f"\n🎭 说话人分离统计:")
+        for speaker, count in speaker_stats.items():
+            print(f"   {speaker}: {count} 个片段")
+
+        # 创建带说话人标签的字幕
+        subs = pysubs2.SSAFile()
+
+        # 处理所有原始片段，为有效片段分配说话人标签
+        valid_idx = 0
+        for segment in segments:
+            start_ms = int(segment["start"] * 1000)
+            end_ms = int(segment["end"] * 1000)
+            text = segment["text"].strip()
+
+            if not text:
+                continue
+
+            # 检查这个片段是否在有效片段中
+            if (valid_idx < len(valid_segments) and
+                abs(segment["start"] - valid_segments[valid_idx]["start"]) < 0.1):
+                # 这是一个有效片段，有说话人标签
+                speaker_label = best_labels[valid_idx]
+                speaker_name = speaker_names.get(speaker_label, f'说话人{speaker_label}')
+                labeled_text = f"[{speaker_name}] {text}"
+                valid_idx += 1
+            else:
+                # 这是一个无效片段，使用默认标签
+                labeled_text = f"[说话人] {text}"
+
+            event = pysubs2.SSAEvent(
+                start=start_ms,
+                end=end_ms,
+                text=labeled_text
+            )
+            subs.events.append(event)
+
+        return subs
+
+    except ImportError as e:
+        print(f"❌ SpeechBrain导入失败: {e}")
+        raise
+    except Exception as e:
+        print(f"❌ SpeechBrain说话人分离失败: {e}")
+        raise
+
+
 def is_audio_file(file_path: Path) -> bool:
     """检测是否为音频文件"""
     audio_extensions = {'.wav', '.mp3', '.m4a', '.flac', '.aac', '.ogg', '.wma'}
@@ -871,15 +996,17 @@ def is_video_file(file_path: Path) -> bool:
     return file_path.suffix.lower() in video_extensions
 
 
-def transcript(input_file: Path, output_dir: Path = None, dry_run=False, enable_diarization=False):
+def transcript(input_file: Path, output_dir: Path = None, dry_run=False, enable_diarization=True):
     """
-    将视频或音频文件转换为字幕文件
+    将视频或音频文件转换为字幕文件，自动生成两个版本：
+    1. SRT文件（不带对话人标识）
+    2. 普通文本文件（每行台词前带有对话人标识）
 
     Args:
         input_file: 输入视频或音频文件路径
         output_dir: 输出目录，如果为None则将srt文件保存到项目根目录
         dry_run: 是否为试运行模式
-        enable_diarization: 是否启用说话人分离功能
+        enable_diarization: 是否启用说话人分离功能（默认为True）
     """
     input_file = Path(input_file)
 
@@ -996,15 +1123,28 @@ def transcript(input_file: Path, output_dir: Path = None, dry_run=False, enable_
     print("应用词典纠错...")
     sub(temp_srt)
 
-    # 复制字幕文件到项目根目录
-    print(f"复制字幕文件到项目根目录: {temp_srt} -> {final_srt}")
-    shutil.copy2(temp_srt, final_srt)
+    # 生成两个版本的文件
+    print("生成两个版本的转录文件...")
+
+    # 1. 生成干净的SRT文件（不带对话人标识）
+    final_clean_srt = final_output_dir / f"{name}.srt"
+    create_clean_srt_file(temp_srt, final_clean_srt)
+
+    # 2. 生成带说话人标识的文本文件
+    final_speaker_txt = final_output_dir / f"{name}-speakers.txt"
+    create_speaker_text_file(temp_srt, final_speaker_txt)
 
     cost(start, prefix="字幕生成完成 ")
-    print(f"字幕文件已保存到: {final_srt}")
+    print(f"\n=== 转录文件生成完成 ===")
+    print(f"✅ SRT字幕文件（无说话人标识）: {final_clean_srt}")
+    print(f"✅ 文本文件（含说话人标识）: {final_speaker_txt}")
     print(f"工作目录: {working_dir}")
+    print("\n💡 提示:")
+    print(f"   - 编辑SRT文件进行字幕校对")
+    print(f"   - 文本文件可用于其他用途")
+    print(f"   - 编辑完成后运行 'transcript resume' 继续处理")
 
-    return final_srt
+    return final_clean_srt, final_speaker_txt
 
 
 def probe_duration(video):

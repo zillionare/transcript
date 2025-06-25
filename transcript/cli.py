@@ -73,7 +73,6 @@ def create_parser():
     )
     gen_parser.add_argument('video', help='输入视频或音频文件路径')
     gen_parser.add_argument('-o', '--output', help='输出目录（默认：项目根目录）')
-    gen_parser.add_argument('--diarization', action='store_true', help='启用说话人分离功能（多人对话）')
 
     # 3. resume - 编辑字幕后继续处理
     resume_parser = subparsers.add_parser(
@@ -192,25 +191,23 @@ def cmd_gen(args):
         from .transcript import transcript
 
         print_banner()
-        print_info(f"开始生成字幕: {args.video}")
-
-        if hasattr(args, 'diarization') and args.diarization:
-            print_info("🎭 启用说话人分离功能")
+        print_info(f"开始生成转录文件: {args.video}")
+        print_info("🎭 自动启用说话人分离功能")
 
         video = validate_video_file(args.video)
         output_dir = Path(args.output) if args.output else None
-        enable_diarization = hasattr(args, 'diarization') and args.diarization
 
-        srt_file = transcript(video, output_dir, enable_diarization=enable_diarization)
+        # 现在transcript函数返回两个文件
+        srt_file, speaker_txt = transcript(video, output_dir, enable_diarization=True)
 
-        print_success(f"字幕生成完成!")
-        print_info(f"字幕文件: {srt_file}")
-        if enable_diarization:
-            print_info("✨ 字幕已包含说话人标签")
-        print_info("下一步: 编辑字幕文件，然后运行 'transcript resume' 继续处理")
+        print_success(f"转录文件生成完成!")
+        print_info(f"SRT字幕文件（无说话人标识）: {srt_file}")
+        print_info(f"文本文件（含说话人标识）: {speaker_txt}")
+        print_info("✨ 已自动生成两个版本的转录文件")
+        print_info("下一步: 编辑SRT字幕文件，然后运行 'transcript resume' 继续处理")
 
     except Exception as e:
-        print_error(f"生成字幕失败: {e}")
+        print_error(f"生成转录文件失败: {e}")
         sys.exit(1)
 
 

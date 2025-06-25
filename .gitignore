@@ -1,1 +1,15 @@
 **/__pycache__/**
+venv/**
+.venv/**
+
+# 模型文件和缓存
+tmp/**
+*.ckpt
+*.bin
+*.pt
+*.pth
+
+# 生成的字幕文件
+*.srt
+*-speakers.txt
+.env

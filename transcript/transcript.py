@@ -77,7 +77,7 @@ def detect_optimal_device_config():
                 os.environ.setdefault('LAPACK_VENDOR', 'Apple')
                 os.environ.setdefault('VECLIB_MAXIMUM_THREADS', '8')
                 os.environ.setdefault('WHISPERX_BATCH_SIZE', '8')
-                os.environ.setdefault('WHISPERX_CHUNK_SIZE', '10')
+                os.environ.setdefault('WHISPERX_CHUNK_SIZE', '5')  # 减小chunk_size以获得更短的片段
 
             elif "M4" in cpu_info or "M3" in cpu_info or "M2" in cpu_info:
                 print("⚡ M4/M3/M2芯片：使用CPU优化配置（推荐）")
@@ -88,7 +88,7 @@ def detect_optimal_device_config():
                 os.environ.setdefault('LAPACK_VENDOR', 'Apple')
                 os.environ.setdefault('VECLIB_MAXIMUM_THREADS', '12')
                 os.environ.setdefault('WHISPERX_BATCH_SIZE', '16')
-                os.environ.setdefault('WHISPERX_CHUNK_SIZE', '15')
+                os.environ.setdefault('WHISPERX_CHUNK_SIZE', '5')  # 减小chunk_size以获得更短的片段
 
                 # 强制禁用MPS，因为WhisperX对MPS支持不完整
                 print("⚠️ 强制禁用MPS设备，使用CPU以确保兼容性")
@@ -99,14 +99,14 @@ def detect_optimal_device_config():
                 device = "cpu"
                 compute_type = "int8"
                 os.environ.setdefault('WHISPERX_BATCH_SIZE', '8')
-                os.environ.setdefault('WHISPERX_CHUNK_SIZE', '10')
+                os.environ.setdefault('WHISPERX_CHUNK_SIZE', '5')  # 减小chunk_size以获得更短的片段
 
         except Exception:
             # 默认配置
             device = "cpu"
             compute_type = "int8"
             os.environ.setdefault('WHISPERX_BATCH_SIZE', '8')
-            os.environ.setdefault('WHISPERX_CHUNK_SIZE', '10')
+            os.environ.setdefault('WHISPERX_CHUNK_SIZE', '5')  # 减小chunk_size以获得更短的片段
 
         # 通用Apple优化
         os.environ.setdefault('OMP_NUM_THREADS', '8')
@@ -117,7 +117,7 @@ def detect_optimal_device_config():
         device = "cpu"
         compute_type = "int8"
         os.environ.setdefault('WHISPERX_BATCH_SIZE', '8')
-        os.environ.setdefault('WHISPERX_CHUNK_SIZE', '10')
+        os.environ.setdefault('WHISPERX_CHUNK_SIZE', '5')  # 减小chunk_size以获得更短的片段
 
     return device, compute_type
 
@@ -135,7 +135,8 @@ if optimal_device == "mps":
     optimal_device = "cpu"
     optimal_compute_type = "int8"
 
-prompt = ",".join(["大家好，我们开始上课了。请输出简体中文。"])
+# 使用更不容易被误识别的prompt
+prompt = "以下是中文音频转录："
 
 opening_video = Path("/Volumes/share/data/autobackup/ke/factor-ml/opening.mp4")
 ending_video = Path("/Volumes/share/data/autobackup/ke/factor-ml/end.mp4")
@@ -168,11 +169,11 @@ def align_subtitles_with_audio(video: Path, original_srt: Path, aligned_srt: Pat
         if not Path(original_srt).exists():
             raise FileNotFoundError(f"字幕文件不存在: {original_srt}")
 
-        # 提取音频
-        audio_path = Path(video).with_suffix(".wav")
-        if not audio_path.exists():
-            print("提取音频文件...")
-            extract_audio(video, audio_path)
+        # 创建专用的16kHz单声道音频文件用于对齐（不覆盖原文件）
+        video_path = Path(video)
+        audio_path = video_path.parent / f"{video_path.stem}_alignment.wav"
+        print(f"📝 为对齐创建16kHz单声道音频: {audio_path.name}")
+        ensure_16khz_mono_wav(video_path, audio_path, force_convert=True)
 
         # 设置设备 - Mac ARM优化
         import platform
@@ -289,10 +290,7 @@ def align_subtitles_with_audio(video: Path, original_srt: Path, aligned_srt: Pat
         # 直接复制原始字幕文件
         shutil.copy2(original_srt, aligned_srt)
         print(f"已复制原始字幕到: {aligned_srt}")
-        print("💡 提示: 要使用字幕对齐功能，请确保:")
-        print("   1. 运行 'python download_models.py' 下载对齐模型")
-        print("   2. 检查模型文件是否完整")
-        print("   3. 确保网络连接正常（首次下载时）")
+
 
 
 def execute(cmd, dry_run=False, supress_log=False, msg: str = ""):
@@ -327,19 +325,16 @@ def _ms_to_hms(ms: int):
     return f"{h:02d}:{m:02d}:{s:02d}.{ms % 1000:03d}"
 
 
-def transcript_cpp(input_audio: Path, output_srt: Path, prompt: str, dry_run=False, enable_diarization=False):
-    """使用whisper.cpp进行音频转录，支持简单说话人分离
+def transcript_cpp(input_audio: Path, output_srt: Path, prompt: str, dry_run=False):
+    """使用whisper.cpp进行音频转录（仅转录，不含说话人分离）
 
     Args:
         input_audio: 输入音频文件路径
         output_srt: 输出字幕文件路径
         prompt: 转录提示词
         dry_run: 是否为试运行模式
-        enable_diarization: 是否启用说话人分离功能
     """
     print(f"使用whisper.cpp转录音频: {input_audio} -> {output_srt}")
-    if enable_diarization:
-        print("🎭 启用简单说话人分离功能")
 
     if dry_run:
         print("试运行模式，跳过实际转录")
@@ -350,80 +345,9 @@ def transcript_cpp(input_audio: Path, output_srt: Path, prompt: str, dry_run=Fal
 
     try:
         execute(cmd)
-
-        # 检查字幕文件是否生成成功
-        if output_srt.exists():
-            print(f"✅ 字幕文件生成成功: {output_srt}")
-
-            # 如果启用说话人分离，处理字幕
-            if enable_diarization:
-                try:
-                    print("🔄 添加说话人分离标签...")
-                    add_speaker_labels_to_srt(output_srt)
-                    print("✅ 说话人分离标签添加完成")
-                except Exception as diarize_error:
-                    print(f"⚠️ 说话人分离处理失败: {diarize_error}")
-                    print("保留原始字幕文件")
-        else:
-            raise FileNotFoundError(f"whisper.cpp未生成字幕文件: {output_srt}")
-
     except Exception as e:
         print(f"❌ whisper.cpp转录失败: {e}")
         raise
-
-
-def add_speaker_labels_to_srt(srt_file: Path):
-    """为现有SRT文件添加简单的说话人标签"""
-    subs = pysubs2.load(str(srt_file))
-
-    if not subs.events:
-        return
-
-    # 简单的说话人分离策略
-    current_speaker = "SPEAKER_A"
-    speaker_count = 0
-    last_end_time = 0
-
-    # 说话人名称映射
-    speaker_names = {
-        "SPEAKER_A": "说话人A",
-        "SPEAKER_B": "说话人B",
-        "SPEAKER_C": "说话人C",
-        "SPEAKER_D": "说话人D",
-    }
-
-    speaker_stats = {}
-
-    for event in subs.events:
-        start_time_sec = event.start / 1000.0
-
-        # 如果间隔超过2秒，可能是说话人切换
-        if start_time_sec - last_end_time > 2.0:
-            speaker_count = (speaker_count + 1) % 2  # 在两个主要说话人之间切换
-            current_speaker = f"SPEAKER_{chr(65 + speaker_count)}"  # A, B, C, D...
-
-        # 统计说话人
-        if current_speaker not in speaker_stats:
-            speaker_stats[current_speaker] = 0
-        speaker_stats[current_speaker] += 1
-
-        # 添加说话人标签
-        speaker_name = speaker_names.get(current_speaker, current_speaker)
-        if not event.text.startswith('['):  # 避免重复添加标签
-            event.text = f"[{speaker_name}] {event.text}"
-
-        last_end_time = event.end / 1000.0
-
-    # 保存修改后的字幕
-    subs.save(str(srt_file))
-
-    # 输出统计信息
-    print(f"\n🎭 说话人分离统计:")
-    for speaker, count in speaker_stats.items():
-        speaker_name = speaker_names.get(speaker, speaker)
-        print(f"   {speaker_name}: {count} 个片段")
-
-    return subs
 
 
 def create_speaker_text_file(srt_file: Path, output_txt: Path):
@@ -742,28 +666,8 @@ def transcriptx_with_diarization(input_audio: Path, output_srt: Path, prompt: st
         try:
             print("🔄 开始说话人分离...")
 
-            # 2. 对齐模型（提高时间戳精度）
-            print("加载对齐模型...")
-            # 使用环境变量设置
-            model_dir = os.environ.get('HF_HOME', None)
-
-            model_a, metadata = whisperx.load_align_model(
-                language_code=result["language"],
-                device=device,
-                model_dir=model_dir
-            )
-
-            print("对齐转录结果...")
-            result = whisperx.align(
-                result["segments"],
-                model_a,
-                metadata,
-                audio,
-                device,
-                return_char_alignments=False,
-            )
-
-            # 3. 说话人分离 - 使用SpeechBrain替代PyAnnote
+            # 直接进行说话人分离，跳过对齐步骤
+            # 注意：对齐将在用户编辑字幕后的resume阶段进行
             print("加载说话人分离模型...")
             try:
                 # 使用SpeechBrain进行说话人分离
@@ -803,11 +707,75 @@ def transcriptx_with_diarization(input_audio: Path, output_srt: Path, prompt: st
 
 
 
+def get_audio_info(audio_file: Path):
+    """
+    获取音频文件的采样率和声道信息
+
+    Returns:
+        tuple: (sample_rate, channels) 或 (None, None) 如果检测失败
+    """
+    try:
+        import subprocess
+        cmd = [
+            "ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams",
+            str(audio_file)
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode == 0:
+            import json
+            data = json.loads(result.stdout)
+            for stream in data.get("streams", []):
+                if stream.get("codec_type") == "audio":
+                    sample_rate = int(stream.get("sample_rate", 0))
+                    channels = int(stream.get("channels", 0))
+                    return sample_rate, channels
+        return None, None
+    except Exception as e:
+        print(f"⚠️ 获取音频信息失败: {e}")
+        return None, None
+
+
+def ensure_16khz_mono_wav(input_file: Path, output_wav: Path, force_convert=False):
+    """
+    确保音频文件为16kHz单声道WAV格式
+
+    Args:
+        input_file: 输入音频/视频文件
+        output_wav: 输出WAV文件路径
+        force_convert: 是否强制转换（即使已经是正确格式）
+    """
+    need_convert = force_convert
+
+    if output_wav.exists() and not force_convert:
+        # 检查现有文件的格式
+        sample_rate, channels = get_audio_info(output_wav)
+        if sample_rate == 16000 and channels == 1:
+            print(f"✅ 音频已是16kHz单声道格式: {output_wav}")
+            return
+        else:
+            print(f"⚠️ 音频格式不正确 (采样率: {sample_rate}Hz, 声道: {channels}), 需要转换")
+            need_convert = True
+    else:
+        need_convert = True
+
+    if need_convert:
+        print(f"🔄 转换音频为16kHz单声道WAV: {input_file} -> {output_wav}")
+        # 统一的转换命令：16kHz, 单声道, PCM 16位
+        cmd = f"ffmpeg -i '{input_file}' -vn -acodec pcm_s16le -ar 16000 -ac 1 -y '{output_wav}' -v error"
+        execute(cmd)
+
+        # 验证转换结果
+        sample_rate, channels = get_audio_info(output_wav)
+        if sample_rate == 16000 and channels == 1:
+            print(f"✅ 音频转换成功: 16kHz单声道")
+        else:
+            print(f"❌ 音频转换可能失败: 采样率={sample_rate}Hz, 声道={channels}")
+
+
 def extract_audio(input_video: Path, output_wav: Path):
-    cmd = (
-        f"ffmpeg -i {input_video} -vn -acodec pcm_s16le -ar 16000 -ac 2 -y {output_wav} -v error"
-    )
-    execute(cmd)
+    """从视频文件提取16kHz单声道音频"""
+    ensure_16khz_mono_wav(input_video, output_wav)
 
 
 def cost(start, cmd: str = "", prefix=""):
@@ -820,9 +788,174 @@ def cost(start, cmd: str = "", prefix=""):
     )
 
 
+def detect_silence_boundaries(audio_segment, sample_rate=16000, silence_threshold=0.01, min_silence_duration=0.3):
+    """
+    检测音频片段中的静音边界，用于进一步分割长片段
+
+    Args:
+        audio_segment: 音频数据
+        sample_rate: 采样率
+        silence_threshold: 静音阈值
+        min_silence_duration: 最小静音持续时间（秒）
+
+    Returns:
+        list: 静音边界的时间点（相对于片段开始的秒数）
+    """
+    import numpy as np
+
+    # 计算音频能量
+    window_size = int(0.1 * sample_rate)  # 100ms窗口
+    energy = []
+
+    for i in range(0, len(audio_segment) - window_size, window_size // 2):
+        window = audio_segment[i:i + window_size]
+        energy.append(np.mean(window ** 2))
+
+    energy = np.array(energy)
+
+    # 检测静音区域
+    silence_mask = energy < silence_threshold
+
+    # 找到静音区域的边界
+    boundaries = []
+    in_silence = False
+    silence_start = 0
+
+    for i, is_silent in enumerate(silence_mask):
+        time_pos = i * (window_size // 2) / sample_rate
+
+        if is_silent and not in_silence:
+            # 静音开始
+            silence_start = time_pos
+            in_silence = True
+        elif not is_silent and in_silence:
+            # 静音结束
+            silence_duration = time_pos - silence_start
+            if silence_duration >= min_silence_duration:
+                # 在静音中点添加边界
+                boundary_time = silence_start + silence_duration / 2
+                boundaries.append(boundary_time)
+            in_silence = False
+
+    return boundaries
+
+
+def filter_prompt_artifacts(segments, prompts_to_remove=None):
+    """
+    过滤掉prompt泄露和重复内容
+
+    Args:
+        segments: 原始片段列表
+        prompts_to_remove: 要移除的prompt列表
+
+    Returns:
+        list: 过滤后的片段列表
+    """
+    if prompts_to_remove is None:
+        prompts_to_remove = [
+            "请输出简体中文。",
+            "请输出简体中文",
+            "大家好，我们开始上课了。",
+            "大家好，我们开始上课了",
+            "请输出简体中文。请输出简体中文。",
+        ]
+
+    filtered_segments = []
+
+    for segment in segments:
+        text = segment["text"].strip()
+
+        # 检查是否是prompt内容
+        is_prompt = False
+        for prompt in prompts_to_remove:
+            if text == prompt or text.replace("。", "") == prompt.replace("。", ""):
+                is_prompt = True
+                break
+
+        # 检查是否是重复的短内容
+        if len(text) < 10 and text.count("。") >= 2:
+            is_prompt = True
+
+        # 检查是否是空白或无意义内容
+        if not text or len(text.strip()) < 2:
+            is_prompt = True
+
+        if not is_prompt:
+            filtered_segments.append(segment)
+
+    return filtered_segments
+
+
+def split_long_segments_by_punctuation(segments, max_duration=4.0):
+    """
+    基于标点符号和时长将过长的片段分割
+
+    Args:
+        segments: 原始片段列表
+        max_duration: 最大片段持续时间（秒）
+
+    Returns:
+        list: 分割后的片段列表
+    """
+    new_segments = []
+
+    for segment in segments:
+        duration = segment["end"] - segment["start"]
+
+        if duration <= max_duration:
+            # 片段不长，直接保留
+            new_segments.append(segment)
+            continue
+
+        text = segment["text"].strip()
+
+        # 寻找合适的分割点（句号、问号、感叹号、逗号）
+        split_chars = ['。', '？', '！', '，', '、']
+        split_positions = []
+
+        for i, char in enumerate(text):
+            if char in split_chars:
+                split_positions.append(i + 1)  # 包含标点符号
+
+        if not split_positions:
+            # 没有标点符号，按字数平均分割
+            mid_point = len(text) // 2
+            split_positions = [mid_point]
+
+        # 选择最佳分割点（尽量在中间）
+        target_pos = len(text) // 2
+        best_pos = min(split_positions, key=lambda x: abs(x - target_pos))
+
+        # 分割文本
+        text1 = text[:best_pos].strip()
+        text2 = text[best_pos:].strip()
+
+        if text1 and text2:
+            # 按时间比例分配
+            time_ratio = len(text1) / len(text)
+            split_time = segment["start"] + duration * time_ratio
+
+            new_segments.append({
+                "start": segment["start"],
+                "end": split_time,
+                "text": text1
+            })
+
+            new_segments.append({
+                "start": split_time,
+                "end": segment["end"],
+                "text": text2
+            })
+        else:
+            # 分割失败，保留原片段
+            new_segments.append(segment)
+
+    return new_segments
+
+
 def speechbrain_speaker_diarization(segments, audio, audio_file_path):
     """
-    使用SpeechBrain进行说话人分离
+    使用SpeechBrain进行说话人分离，支持长片段的智能分割
 
     Args:
         segments: WhisperX转录的片段
@@ -838,6 +971,19 @@ def speechbrain_speaker_diarization(segments, audio, audio_file_path):
         from speechbrain.inference import SpeakerRecognition
         import torch
         import numpy as np
+
+        # 首先过滤prompt泄露和无效内容
+        print("🧹 过滤prompt泄露和无效内容...")
+        original_count = len(segments)
+        segments = filter_prompt_artifacts(segments)
+        filtered_count = len(segments)
+        if original_count > filtered_count:
+            print(f"已过滤 {original_count - filtered_count} 个无效片段")
+
+        # 然后分割过长的片段
+        print("🔪 分割过长的音频片段...")
+        segments = split_long_segments_by_punctuation(segments, max_duration=4.0)
+        print(f"最终共有 {len(segments)} 个有效片段")
 
         # 加载说话人识别模型
         print("加载SpeechBrain说话人识别模型...")
@@ -1067,29 +1213,13 @@ def transcript(input_file: Path, output_dir: Path = None, dry_run=False, enable_
     start = datetime.datetime.now()
     print(f"{start.hour:02d}:{start.minute:02d}:{start.second:02d}: 开始处理")
 
-    if is_audio:
-        # 对于音频文件，需要确保格式为16kHz WAV
-        output_wav = media_file.with_suffix(".wav")
-        if not output_wav.exists():
-            print("转换音频格式为16kHz WAV...")
-            # 强制转换为16kHz采样率，这是whisper.cpp的要求
-            cmd = f"ffmpeg -i '{media_file}' -acodec pcm_s16le -ar 16000 -ac 1 -y '{output_wav}' -v error"
-            execute(cmd)
-        else:
-            # 即使是WAV文件，也需要检查采样率
-            print("检查并转换音频采样率为16kHz...")
-            temp_wav = output_wav.parent / f"{output_wav.stem}_temp.wav"
-            cmd = f"ffmpeg -i '{output_wav}' -acodec pcm_s16le -ar 16000 -ac 1 -y '{temp_wav}' -v error"
-            execute(cmd)
-            # 替换原文件
-            import os
-            os.replace(temp_wav, output_wav)
-    else:
-        # 对于视频文件，提取音频
-        output_wav = media_file.with_suffix(".wav")
-        if not output_wav.exists():
-            print("提取音频...")
-            extract_audio(media_file, output_wav)
+    # 创建专用的16kHz单声道音频文件用于转录（不覆盖原文件）
+    transcription_wav = media_file.parent / f"{media_file.stem}_transcription.wav"
+
+    # 统一处理：无论音频还是视频，都转换为16kHz单声道用于转录
+    file_type = "音频" if is_audio else "视频"
+    print(f"📝 从{file_type}创建16kHz单声道音频用于转录: {transcription_wav.name}")
+    ensure_16khz_mono_wav(media_file, transcription_wav, force_convert=True)
 
     # 生成字幕到临时位置
     print("生成字幕...")
@@ -1100,18 +1230,21 @@ def transcript(input_file: Path, output_dir: Path = None, dry_run=False, enable_
     if enable_diarization:
         # 说话人分离必须使用whisperx，不使用whisper.cpp
         print("🎭 说话人分离功能需要使用whisperx...")
-        transcriptx_with_diarization(output_wav, temp_srt, prompt)
+        transcriptx_with_diarization(transcription_wav, temp_srt, prompt)
     elif whisper_cpp_available and not dry_run:
+        # 使用whisper.cpp进行纯转录（无说话人分离）
         try:
-            transcript_cpp(output_wav, temp_srt, prompt, dry_run)
+            print("🚀 使用whisper.cpp进行转录...")
+            transcript_cpp(transcription_wav, temp_srt, prompt, dry_run)
         except Exception as e:
             print(f"⚠️ whisper.cpp转录失败: {e}")
             print("回退到whisperx转录...")
-            transcriptx(output_wav, temp_srt, prompt)
+            transcriptx(transcription_wav, temp_srt, prompt)
     else:
+        # 使用whisperx进行转录
         if not whisper_cpp_available:
             print("⚠️ whisper.cpp不可用，使用whisperx转录...")
-        transcriptx(output_wav, temp_srt, prompt)
+        transcriptx(transcription_wav, temp_srt, prompt)
 
     # 检查字幕文件是否生成成功
     if not temp_srt.exists():

@@ -12,4 +12,8 @@ tmp/**
 # 生成的字幕文件
 *.srt
 *-speakers.txt
+
+# 转录专用音频文件（不覆盖原文件）
+*_transcription.wav
+*_alignment.wav
 .env

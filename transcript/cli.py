@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Transcript CLI - 简化的命令行接口
+Transcript CLI - 使用Fire的简洁命令行接口
 
-提供更友好的命令行体验，简化视频字幕处理操作。
+Fire让命令行接口变得非常直观和强大！
 """
 
-import argparse
 import os
 import sys
 from pathlib import Path
 from typing import Optional
+import fire
 
 
 def setup_huggingface_env():
@@ -39,265 +39,191 @@ def setup_huggingface_env():
 setup_huggingface_env()
 
 
-def create_parser():
-    """创建命令行参数解析器"""
-    parser = argparse.ArgumentParser(
-        prog='transcript',
-        description='视频字幕处理工具',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-示例:
-  transcript auto video.mp4                  # 自动处理（无需手动编辑）
-  transcript gen video.mp4                   # 生成字幕
-  transcript resume                          # 编辑字幕后继续处理
-  transcript status                          # 查看状态
+class TranscriptCLI:
+    """
+    Transcript 视频字幕处理工具
+
+    使用Fire提供简洁直观的命令行接口。
+
+    示例:
+        transcript auto video.mp4                    # 自动处理（无需手动编辑）
+        transcript gen video.mp4                     # 生成字幕
+        transcript resume                            # 编辑字幕后继续处理
+        transcript status                            # 查看状态
+
+        # 带参数的例子
+        transcript auto video.mp4 --output /path/to/output
+        transcript gen video.mp4 --output /path/to/output
+        transcript resume --opening opening.mp4 --ending ending.mp4
+    """
+
+
+    def _print_banner(self):
+        """打印欢迎横幅"""
+        print("=" * 60)
+        print("🎬 Transcript - 视频字幕处理工具")
+        print("=" * 60)
+
+    def _validate_media_file(self, file_path: str) -> Path:
+        """验证视频或音频文件"""
+        media_file = Path(file_path)
+        if not media_file.exists():
+            raise FileNotFoundError(f"文件不存在: {file_path}")
+
+        video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv'}
+        audio_extensions = {'.wav', '.mp3', '.m4a', '.flac', '.aac', '.ogg', '.wma'}
+        valid_extensions = video_extensions | audio_extensions
+
+        if media_file.suffix.lower() not in valid_extensions:
+            raise ValueError(f"不支持的文件格式: {media_file.suffix}。支持的格式：视频({', '.join(video_extensions)})，音频({', '.join(audio_extensions)})")
+
+        return media_file
+
+
+    def auto(self, video: str, output: Optional[str] = None, opening: Optional[str] = None, ending: Optional[str] = None):
         """
-    )
+        自动处理流程（无需手动编辑字幕）
 
-    subparsers = parser.add_subparsers(dest='command', help='可用命令')
+        Args:
+            video: 输入视频或音频文件路径
+            output: 输出目录
+            opening: 片头视频路径（仅视频文件支持）
+            ending: 片尾视频路径（仅视频文件支持）
+        """
+        try:
+            # 延迟导入
+            from .transcript import auto
 
-    # 1. auto - 自动处理流程
-    auto_parser = subparsers.add_parser(
-        'auto',
-        help='自动处理流程（无需手动编辑字幕）'
-    )
-    auto_parser.add_argument('video', help='输入视频或音频文件路径')
-    auto_parser.add_argument('-o', '--output', help='输出目录')
-    auto_parser.add_argument('--opening', help='片头视频路径（仅视频文件支持）')
-    auto_parser.add_argument('--ending', help='片尾视频路径（仅视频文件支持）')
+            self._print_banner()
+            print(f"ℹ️  开始自动处理流程: {video}")
+            print("ℹ️  自动处理模式 - 将跳过手动编辑步骤")
 
-    # 2. gen - 生成字幕
-    gen_parser = subparsers.add_parser(
-        'gen',
-        help='生成字幕文件'
-    )
-    gen_parser.add_argument('video', help='输入视频或音频文件路径')
-    gen_parser.add_argument('-o', '--output', help='输出目录（默认：项目根目录）')
+            media_file = self._validate_media_file(video)
 
-    # 3. resume - 编辑字幕后继续处理
-    resume_parser = subparsers.add_parser(
-        'resume',
-        help='编辑字幕后继续处理（自动调用align）'
-    )
-    resume_parser.add_argument('-o', '--output', help='输出目录')
-    resume_parser.add_argument('--opening', help='片头视频路径')
-    resume_parser.add_argument('--ending', help='片尾视频路径')
+            final_with_sub, final_no_sub, final_srt = auto(
+                str(media_file),
+                output_path=output,
+                opening_video=opening,
+                ending_video=ending
+            )
 
-    # 4. status - 查看状态
-    status_parser = subparsers.add_parser(
-        'status',
-        help='查看当前处理状态'
-    )
+            print("✅ 处理完成!")
+            if final_no_sub:  # 视频文件
+                print(f"ℹ️  带字幕视频: {final_with_sub}")
+                print(f"ℹ️  无字幕视频: {final_no_sub}")
+            else:  # 音频文件
+                print(f"ℹ️  剪辑音频: {final_with_sub}")
+            print(f"ℹ️  字幕文件: {final_srt}")
 
-    return parser
+        except Exception as e:
+            print(f"❌ 处理失败: {e}")
+            sys.exit(1)
 
 
-def print_banner():
-    """打印欢迎横幅"""
-    print("=" * 60)
-    print("🎬 Transcript - 视频字幕处理工具")
-    print("=" * 60)
+    def gen(self, video: str, output: Optional[str] = None):
+        """
+        生成字幕文件
+
+        Args:
+            video: 输入视频或音频文件路径
+            output: 输出目录（默认：项目根目录）
+        """
+        try:
+            from .transcript import transcript
+
+            self._print_banner()
+            print(f"ℹ️  开始生成转录文件: {video}")
+            print("ℹ️  🎭 自动启用说话人分离功能")
+
+            media_file = self._validate_media_file(video)
+            output_dir = Path(output) if output else None
+
+            # 现在transcript函数返回两个文件，自动启用说话人分离
+            srt_file, speaker_txt = transcript(media_file, output_dir, enable_diarization=True)
+
+            print("✅ 转录文件生成完成!")
+            print(f"ℹ️  SRT字幕文件（无说话人标识）: {srt_file}")
+            print(f"ℹ️  文本文件（含说话人标识）: {speaker_txt}")
+            print("ℹ️  ✨ 已自动生成两个版本的转录文件")
+            print("ℹ️  下一步: 编辑SRT字幕文件，然后运行 'transcript resume' 继续处理")
+
+        except Exception as e:
+            print(f"❌ 生成转录文件失败: {e}")
+            sys.exit(1)
 
 
-def print_success(message: str):
-    """打印成功消息"""
-    print(f"✅ {message}")
+    def resume(self, output: Optional[str] = None, opening: Optional[str] = None, ending: Optional[str] = None):
+        """
+        编辑字幕后继续处理（自动调用align）
+
+        Args:
+            output: 输出目录
+            opening: 片头视频路径
+            ending: 片尾视频路径
+        """
+        try:
+            # 延迟导入
+            from .transcript import resume
+
+            self._print_banner()
+
+            final_with_sub, final_no_sub, final_srt = resume(
+                output_path=output,
+                opening_video=opening,
+                ending_video=ending
+            )
+
+            print("✅ 处理完成!")
+            if final_no_sub:  # 视频文件
+                print(f"ℹ️  带字幕视频: {final_with_sub}")
+                print(f"ℹ️  无字幕视频: {final_no_sub}")
+            else:  # 音频文件
+                print(f"ℹ️  剪辑音频: {final_with_sub}")
+            print(f"ℹ️  字幕文件: {final_srt}")
+
+        except Exception as e:
+            print(f"❌ 处理失败: {e}")
+            sys.exit(1)
 
 
-def print_error(message: str):
-    """打印错误消息"""
-    print(f"❌ {message}")
+    def status(self):
+        """查看当前处理状态"""
+        try:
+            self._print_banner()
+            print("ℹ️  查看处理状态...")
 
+            # 查找最近的工作目录
+            tmp_dir = Path("/tmp/transcript")
+            if tmp_dir.exists():
+                log_files = list(tmp_dir.glob("*/.log"))
+                if log_files:
+                    latest_log = max(log_files, key=lambda x: x.stat().st_mtime)
+                    print(f"ℹ️  最近的工作目录: {latest_log.parent}")
 
-def print_info(message: str):
-    """打印信息消息"""
-    print(f"ℹ️  {message}")
-
-
-def print_warning(message: str):
-    """打印警告消息"""
-    print(f"⚠️  {message}")
-
-
-def validate_media_file(file_path: str) -> Path:
-    """验证视频或音频文件"""
-    media_file = Path(file_path)
-    if not media_file.exists():
-        raise FileNotFoundError(f"文件不存在: {file_path}")
-
-    video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv'}
-    audio_extensions = {'.wav', '.mp3', '.m4a', '.flac', '.aac', '.ogg', '.wma'}
-    valid_extensions = video_extensions | audio_extensions
-
-    if media_file.suffix.lower() not in valid_extensions:
-        raise ValueError(f"不支持的文件格式: {media_file.suffix}。支持的格式：视频({', '.join(video_extensions)})，音频({', '.join(audio_extensions)})")
-
-    return media_file
-
-
-def validate_video_file(video_path: str) -> Path:
-    """验证视频文件（保持向后兼容）"""
-    return validate_media_file(video_path)
-
-
-def validate_subtitle_file(subtitle_path: str) -> Path:
-    """验证字幕文件"""
-    subtitle = Path(subtitle_path)
-    if not subtitle.exists():
-        raise FileNotFoundError(f"字幕文件不存在: {subtitle_path}")
-    
-    if subtitle.suffix.lower() != '.srt':
-        raise ValueError(f"不支持的字幕格式: {subtitle.suffix}")
-    
-    return subtitle
-
-
-def cmd_auto(args):
-    """自动处理流程命令"""
-    try:
-        # 延迟导入
-        from .transcript import auto
-
-        print_banner()
-        print_info(f"开始自动处理流程: {args.video}")
-        print_info("自动处理模式 - 将跳过手动编辑步骤")
-
-        video = validate_video_file(args.video)
-
-        final_with_sub, final_no_sub, final_srt = auto(
-            str(video),
-            output_path=args.output,
-            opening_video=args.opening,
-            ending_video=args.ending
-        )
-
-        print_success("处理完成!")
-        if final_no_sub:  # 视频文件
-            print_info(f"带字幕视频: {final_with_sub}")
-            print_info(f"无字幕视频: {final_no_sub}")
-        else:  # 音频文件
-            print_info(f"剪辑音频: {final_with_sub}")
-        print_info(f"字幕文件: {final_srt}")
-
-    except Exception as e:
-        print_error(f"处理失败: {e}")
-        sys.exit(1)
-
-
-def cmd_gen(args):
-    """生成字幕命令"""
-    try:
-        # 延迟导入以避免启动时的依赖问题
-        from .transcript import transcript
-
-        print_banner()
-        print_info(f"开始生成转录文件: {args.video}")
-        print_info("🎭 自动启用说话人分离功能")
-
-        video = validate_video_file(args.video)
-        output_dir = Path(args.output) if args.output else None
-
-        # 现在transcript函数返回两个文件
-        srt_file, speaker_txt = transcript(video, output_dir, enable_diarization=True)
-
-        print_success(f"转录文件生成完成!")
-        print_info(f"SRT字幕文件（无说话人标识）: {srt_file}")
-        print_info(f"文本文件（含说话人标识）: {speaker_txt}")
-        print_info("✨ 已自动生成两个版本的转录文件")
-        print_info("下一步: 编辑SRT字幕文件，然后运行 'transcript resume' 继续处理")
-
-    except Exception as e:
-        print_error(f"生成转录文件失败: {e}")
-        sys.exit(1)
-
-
-def cmd_resume(args):
-    """编辑后继续处理命令"""
-    try:
-        # 延迟导入
-        from .transcript import resume
-
-        print_banner()
-
-        final_with_sub, final_no_sub, final_srt = resume(
-            output_path=args.output,
-            opening_video=args.opening,
-            ending_video=args.ending
-        )
-
-        print_success("处理完成!")
-        if final_no_sub:  # 视频文件
-            print_info(f"带字幕视频: {final_with_sub}")
-            print_info(f"无字幕视频: {final_no_sub}")
-        else:  # 音频文件
-            print_info(f"剪辑音频: {final_with_sub}")
-        print_info(f"字幕文件: {final_srt}")
-
-    except Exception as e:
-        print_error(f"处理失败: {e}")
-        sys.exit(1)
-
-
-def cmd_status(args):
-    """查看状态命令"""
-    try:
-        print_banner()
-        print_info("查看处理状态...")
-        
-        # 查找最近的工作目录
-        tmp_dir = Path("/tmp/transcript")
-        if tmp_dir.exists():
-            log_files = list(tmp_dir.glob("*/.log"))
-            if log_files:
-                latest_log = max(log_files, key=lambda x: x.stat().st_mtime)
-                print_info(f"最近的工作目录: {latest_log.parent}")
-                
-                import json
-                with open(latest_log, 'r', encoding='utf-8') as f:
-                    log_data = json.load(f)
-                    print_info(f"项目名称: {log_data.get('name', 'N/A')}")
-                    # 兼容新旧日志格式
-                    if 'raw_file' in log_data:
-                        file_type = log_data.get('file_type', 'unknown')
-                        print_info(f"原始文件: {log_data.get('raw_file', 'N/A')} ({file_type})")
-                    else:
-                        print_info(f"原始视频: {log_data.get('raw_video', 'N/A')}")
-                    print_info(f"创建时间: {log_data.get('timestamp', 'N/A')}")
+                    import json
+                    with open(latest_log, 'r', encoding='utf-8') as f:
+                        log_data = json.load(f)
+                        print(f"ℹ️  项目名称: {log_data.get('name', 'N/A')}")
+                        # 兼容新旧日志格式
+                        if 'raw_file' in log_data:
+                            file_type = log_data.get('file_type', 'unknown')
+                            print(f"ℹ️  原始文件: {log_data.get('raw_file', 'N/A')} ({file_type})")
+                        else:
+                            print(f"ℹ️  原始视频: {log_data.get('raw_video', 'N/A')}")
+                        print(f"ℹ️  创建时间: {log_data.get('timestamp', 'N/A')}")
+                else:
+                    print("ℹ️  没有找到活动的处理任务")
             else:
-                print_info("没有找到活动的处理任务")
-        else:
-            print_info("没有找到工作目录")
-            
-    except Exception as e:
-        print_error(f"查看状态失败: {e}")
-        sys.exit(1)
+                print("ℹ️  没有找到工作目录")
+
+        except Exception as e:
+            print(f"❌ 查看状态失败: {e}")
+            sys.exit(1)
 
 
 def main():
-    """主入口函数"""
-    parser = create_parser()
-    
-    # 如果没有参数，显示帮助
-    if len(sys.argv) == 1:
-        parser.print_help()
-        sys.exit(0)
-    
-    args = parser.parse_args()
-    
-    # 根据命令调用相应函数
-    command_map = {
-        'auto': cmd_auto,
-        'gen': cmd_gen,
-        'resume': cmd_resume,
-        'status': cmd_status,
-    }
-    
-    if args.command in command_map:
-        command_map[args.command](args)
-    else:
-        print_error(f"未知命令: {args.command}")
-        parser.print_help()
-        sys.exit(1)
+    """主入口函数 - 使用Fire启动CLI"""
+    fire.Fire(TranscriptCLI)
 
 
 if __name__ == '__main__':

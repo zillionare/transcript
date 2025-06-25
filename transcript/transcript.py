@@ -31,7 +31,7 @@ from pathlib import Path
 from subprocess import PIPE, STDOUT, Popen
 from typing import Any, List, Tuple
 
-# fire已移除，使用CLI接口
+# Fire已恢复，提供简洁直观的CLI接口
 import jieba
 import opencc
 import pysubs2

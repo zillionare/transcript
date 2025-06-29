@@ -42,6 +42,8 @@ import pysubs2
 warnings.filterwarnings("ignore")
 
 import whisperx
+from silero_vad import load_silero_vad, read_audio, get_speech_timestamps
+import torch
 
 
 def detect_optimal_device_config():
@@ -150,6 +152,95 @@ model_dir = os.path.join(hf_home, "hub")
 # 设置whisperx模型名称
 whisperx_model = "large-v2"  # 支持中文的whisper模型
 w2v_model = "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn"  # 中文对齐模型
+
+def preprocess_audio_with_vad(input_audio: Path, output_audio: Path, min_speech_duration_ms: int = 250, min_silence_duration_ms: int = 100):
+    """
+    使用Silero VAD对音频进行预处理，移除静音片段
+    
+    Args:
+        input_audio: 输入音频文件路径
+        output_audio: 输出音频文件路径
+        min_speech_duration_ms: 最小语音片段长度（毫秒）
+        min_silence_duration_ms: 最小静音片段长度（毫秒）
+    
+    Returns:
+        bool: 预处理是否成功
+    """
+    try:
+        print(f"🎯 开始VAD预处理: {input_audio} -> {output_audio}")
+        
+        # 加载Silero VAD模型
+        print("📥 加载Silero VAD模型...")
+        model = load_silero_vad()
+        
+        # 读取音频文件（Silero VAD要求16kHz采样率）
+        print("📖 读取音频文件...")
+        wav = read_audio(str(input_audio), sampling_rate=16000)
+        
+        # 检测语音时间戳
+        print("🔍 检测语音片段...")
+        speech_timestamps = get_speech_timestamps(
+            wav, 
+            model, 
+            sampling_rate=16000,
+            min_speech_duration_ms=min_speech_duration_ms,
+            min_silence_duration_ms=min_silence_duration_ms,
+            window_size_samples=1536,  # 适合16kHz的窗口大小
+            speech_pad_ms=30  # 语音片段前后填充30ms
+        )
+        
+        if not speech_timestamps:
+            print("⚠️ 未检测到语音片段，保留原始音频")
+            import shutil
+            shutil.copy2(input_audio, output_audio)
+            return True
+            
+        print(f"✅ 检测到 {len(speech_timestamps)} 个语音片段")
+        
+        # 合并语音片段
+        speech_segments = []
+        for segment in speech_timestamps:
+            start_sample = segment['start']
+            end_sample = segment['end']
+            speech_segments.append(wav[start_sample:end_sample])
+            
+        # 拼接所有语音片段
+        if speech_segments:
+            processed_audio = torch.cat(speech_segments, dim=0)
+            
+            # 保存处理后的音频
+            print(f"💾 保存VAD处理后的音频: {output_audio}")
+            import torchaudio
+            torchaudio.save(str(output_audio), processed_audio.unsqueeze(0), 16000)
+            
+            # 计算压缩比例
+            original_duration = len(wav) / 16000
+            processed_duration = len(processed_audio) / 16000
+            compression_ratio = (1 - processed_duration / original_duration) * 100
+            
+            print(f"📊 VAD处理统计:")
+            print(f"   原始时长: {original_duration:.2f}秒")
+            print(f"   处理后时长: {processed_duration:.2f}秒")
+            print(f"   压缩比例: {compression_ratio:.1f}%")
+            
+            return True
+        else:
+            print("⚠️ 没有有效的语音片段，保留原始音频")
+            import shutil
+            shutil.copy2(input_audio, output_audio)
+            return True
+            
+    except Exception as e:
+        print(f"❌ VAD预处理失败: {e}")
+        print("📋 回退到原始音频文件")
+        try:
+            import shutil
+            shutil.copy2(input_audio, output_audio)
+            return False
+        except Exception as copy_error:
+            print(f"❌ 复制原始音频失败: {copy_error}")
+            return False
+
 
 def align_subtitles_with_audio(video: Path, original_srt: Path, aligned_srt: Path):
     """
@@ -307,12 +398,18 @@ def execute(cmd, dry_run=False, supress_log=False, msg: str = ""):
         args = shlex.split(cmd)
     else:
         args = cmd
+    
+    # 收集所有输出用于错误处理
+    output_lines = []
     with Popen(args, stdout=PIPE, stderr=STDOUT, text=True) as proc:
         for line in proc.stdout:  # type: ignore
-            print(line)
+            print(line.rstrip())  # 打印时去掉换行符避免双换行
+            output_lines.append(line.rstrip())
 
     if proc.returncode != 0:
-        raise RuntimeError(f"FFmpeg Error {proc.returncode}: {proc.stderr}")
+        # 将所有输出合并作为错误信息
+        error_output = "\n".join(output_lines)
+        raise RuntimeError(f"Command failed with exit code {proc.returncode}: {error_output}")
 
     if not supress_log:
         cost(start, prefix=f"<<< {msg} Done ")
@@ -327,29 +424,282 @@ def _ms_to_hms(ms: int):
     return f"{h:02d}:{m:02d}:{s:02d}.{ms % 1000:03d}"
 
 
-def transcript_cpp(input_audio: Path, output_srt: Path, prompt: str, dry_run=False):
-    """使用whisper.cpp进行音频转录（仅转录，不含说话人分离）
+
+
+
+def get_whisper_cpp_optimal_config():
+    """获取whisper.cpp的最优配置参数
+    
+    Returns:
+        dict: 包含最优配置参数的字典
+    """
+    import platform
+    
+    config = {
+        "threads": 8,
+        "use_gpu": False,
+        "flash_attn": False
+    }
+    
+    # 检测系统配置
+    system = platform.system()
+    machine = platform.machine()
+    
+    if system == "Darwin" and machine == "arm64":
+        # Apple Silicon优化
+        try:
+            result = subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'],
+                                  capture_output=True, text=True)
+            cpu_info = result.stdout.strip()
+            
+            if "M1" in cpu_info:
+                config["threads"] = 8
+                print("⚡ M1芯片：使用8线程配置")
+            elif "M4" in cpu_info or "M3" in cpu_info or "M2" in cpu_info:
+                config["threads"] = 12
+                print("⚡ M4/M3/M2芯片：使用12线程配置")
+                
+            # 检查是否支持Metal GPU加速
+            whisper = os.path.join(cpp_path, "whisper-cli")
+            if os.path.exists(whisper):
+                result = subprocess.run([whisper, "--help"], 
+                                      capture_output=True, text=True, timeout=5)
+                help_text = result.stdout + result.stderr
+                if "--gpu" in help_text or "-ngl" in help_text:
+                    config["use_gpu"] = True
+                    print("🚀 启用Metal GPU加速")
+                    
+        except Exception as e:
+            print(f"⚠️ 检测Apple Silicon配置时出错: {e}")
+    
+    return config
+
+
+def check_whisper_cpp_vad_support():
+    """检查whisper.cpp是否支持VAD功能
+    
+    通过运行whisper-cli --help检查是否支持-vm和--vad参数
+    
+    Returns:
+        bool: 如果支持VAD返回True，否则返回False
+    """
+    try:
+        whisper = os.path.join(cpp_path, "whisper-cli")
+        if not os.path.exists(whisper):
+            return False
+            
+        # 检查help输出中是否包含VAD相关参数
+        result = subprocess.run([whisper, "--help"], 
+                              capture_output=True, text=True, timeout=5)
+        help_text = result.stdout + result.stderr
+        
+        # 检查是否支持VAD参数
+        vad_supported = "-vm" in help_text or "--vad" in help_text
+        
+        if vad_supported:
+            print("✅ whisper.cpp支持VAD功能")
+        else:
+            print("⚠️ 当前whisper.cpp版本不支持VAD功能")
+            print("   请使用支持VAD的whisper.cpp版本或重新编译")
+            
+        return vad_supported
+        
+    except Exception as e:
+        print(f"⚠️ 检查whisper.cpp VAD支持时出错: {e}")
+        return False
+
+
+def check_whisper_cpp_diarization_support():
+    """检查whisper.cpp是否支持diarization功能
+    
+    whisper.cpp通过tinydiarize模型支持说话人分离，使用--tdrz参数
+    需要检查是否有tinydiarize模型文件
+    
+    Returns:
+        bool: 如果支持diarization返回True，否则返回False
+    """
+    try:
+        whisper = os.path.join(cpp_path, "whisper-cli")
+        if not os.path.exists(whisper):
+            return False
+            
+        # 检查是否有tinydiarize模型文件
+        models_dir = os.path.join(cpp_path, "models")
+        tdrz_models = []
+        if os.path.exists(models_dir):
+            for file in os.listdir(models_dir):
+                if "tdrz" in file.lower() and file.endswith(".bin"):
+                    tdrz_models.append(file)
+        
+        if tdrz_models:
+            print(f"✅ 发现tinydiarize模型: {', '.join(tdrz_models)}")
+            return True
+        else:
+            print("⚠️ 未找到tinydiarize模型，说话人分离功能不可用")
+            print("   可通过以下命令下载tinydiarize模型:")
+            print("   ./models/download-ggml-model.sh small.en-tdrz")
+            return False
+        
+    except Exception as e:
+        print(f"⚠️ 检查whisper.cpp diarization支持时出错: {e}")
+        return False
+
+
+def transcript_cpp(input_audio: Path, output_srt: Path, prompt: str, dry_run=False, enable_diarization=False, enable_vad=True):
+    """使用whisper.cpp进行音频转录，支持说话人分离和VAD
 
     Args:
         input_audio: 输入音频文件路径
         output_srt: 输出字幕文件路径
         prompt: 转录提示词
         dry_run: 是否为试运行模式
+        enable_diarization: 是否启用说话人分离
+        enable_vad: 是否启用语音活动检测(VAD)
     """
-    print(f"使用whisper.cpp转录音频: {input_audio} -> {output_srt}")
+    diarization_info = "（含说话人分离）" if enable_diarization else "（纯转录）"
+    print(f"使用whisper.cpp转录音频{diarization_info}: {input_audio} -> {output_srt}")
 
     if dry_run:
         print("试运行模式，跳过实际转录")
         return
 
     whisper = os.path.join(cpp_path, "whisper-cli")
-    cmd = f"{whisper} {input_audio} -l zh -sow -ml 30 -t 8 -m {cpp_model} -osrt -of {output_srt.with_suffix('')} --prompt '{prompt}'"
-
+    
+    # 获取最优配置
+    config = get_whisper_cpp_optimal_config()
+    
+    # 基础命令参数
+    base_args = [
+        str(input_audio),
+        "-l", "zh",          # 中文语言
+        "-sow",              # split on word
+        "-ml", "30",         # max line length
+        "-t", str(config["threads"]),  # 优化的线程数
+        "-m", str(cpp_model), # model path
+        "-osrt",             # output srt format
+        "-of", str(output_srt.with_suffix('')),  # output file prefix
+        "--prompt", prompt   # prompt
+    ]
+    
+    # 添加GPU加速（如果支持）
+    if config["use_gpu"]:
+        base_args.extend([
+            "-ngl", "999"        # 使用GPU层数（999表示全部）
+        ])
+        print("🚀 使用GPU加速")
+    
+    # 添加Flash Attention（如果支持）
+    if config["flash_attn"]:
+        base_args.append("--flash-attn")
+        print("⚡ 启用Flash Attention")
+    
+    # VAD功能支持（需要编译时启用VAD支持的whisper.cpp版本）
+    if enable_vad:
+        # 首先检查whisper.cpp是否支持VAD功能
+        if check_whisper_cpp_vad_support():
+            vad_model_path = os.path.join(cpp_path, "models", "ggml-silero-v5.1.2.bin")
+            if os.path.exists(vad_model_path):
+                base_args.extend([
+                    "-vm", vad_model_path,  # VAD model path
+                    "--vad"                 # enable VAD
+                ])
+                print("🎯 启用VAD（语音活动检测）功能")
+                print(f"   使用VAD模型: {vad_model_path}")
+            else:
+                print("⚠️ VAD模型文件不存在，跳过VAD配置")
+                print(f"   请确保VAD模型存在于: {vad_model_path}")
+                print("   可以通过以下命令下载VAD模型:")
+                print("   ./models/download-vad-model.sh silero-v5.1.2")
+                print("   或手动下载: curl -L -o models/ggml-silero-v5.1.2.bin https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin")
+        else:
+            print("⚠️ 跳过VAD配置，因为当前whisper.cpp版本不支持VAD功能")
+    
+    # 如果启用说话人分离，检查支持情况并添加相应参数
+    if enable_diarization:
+        # 检查whisper.cpp是否支持diarization
+        if not check_whisper_cpp_diarization_support():
+            print("⚠️ whisper.cpp不支持说话人分离功能，回退到whisperx")
+            raise Exception("whisper.cpp不支持说话人分离功能，需要回退到whisperx")
+            
+        # 查找tinydiarize模型
+        models_dir = os.path.join(cpp_path, "models")
+        tdrz_model = None
+        if os.path.exists(models_dir):
+            for file in os.listdir(models_dir):
+                if "tdrz" in file.lower() and file.endswith(".bin"):
+                    tdrz_model = os.path.join(models_dir, file)
+                    break
+        
+        if tdrz_model:
+            # 使用tinydiarize模型替换普通模型
+            # 找到模型参数的位置并替换
+            for i, arg in enumerate(base_args):
+                if arg == "-m":
+                    base_args[i+1] = tdrz_model
+                    break
+            # 添加--tdrz参数启用说话人分离
+            base_args.append("-tdrz")
+            print(f"🎯 启用说话人分离功能，使用模型: {os.path.basename(tdrz_model)}")
+        else:
+            print("⚠️ 未找到tinydiarize模型，回退到whisperx")
+            raise Exception("未找到tinydiarize模型，需要回退到whisperx")
+    
+    # 构建完整命令
+    cmd_parts = [whisper] + base_args
+    cmd = " ".join([f"'{part}'" if " " in str(part) else str(part) for part in cmd_parts])
+    
+    print(f"🔧 whisper.cpp命令: {cmd}")
+    
     try:
         execute(cmd)
+        
+        # 检查输出文件是否生成
+        if not output_srt.exists():
+            raise FileNotFoundError(f"whisper.cpp未生成输出文件: {output_srt}")
+            
+        print(f"✅ whisper.cpp转录完成: {output_srt}")
+        
     except Exception as e:
-        print(f"❌ whisper.cpp转录失败: {e}")
-        raise
+        error_msg = str(e)
+        
+        # 检查是否是VAD参数不支持的错误
+        if enable_vad and ("unknown argument: -vm" in error_msg or "unknown argument: --vad" in error_msg):
+            print("⚠️ 当前whisper.cpp版本不支持VAD功能，尝试不使用VAD重新转录")
+            
+            # 移除VAD相关参数并重试
+            retry_args = []
+            skip_next = False
+            for i, arg in enumerate(base_args):
+                if skip_next:
+                    skip_next = False
+                    continue
+                if arg == "-vm":
+                    skip_next = True  # 跳过下一个参数（VAD模型路径）
+                    continue
+                if arg == "--vad":
+                    continue
+                retry_args.append(arg)
+            
+            # 重新构建命令
+            retry_cmd_parts = [whisper] + retry_args
+            retry_cmd = " ".join([f"'{part}'" if " " in str(part) else str(part) for part in retry_cmd_parts])
+            
+            try:
+                print(f"🔄 重试命令: {retry_cmd}")
+                execute(retry_cmd)
+                
+                # 检查输出文件是否生成
+                if not output_srt.exists():
+                    raise FileNotFoundError(f"whisper.cpp未生成输出文件: {output_srt}")
+                    
+                print(f"✅ whisper.cpp转录完成（未使用VAD）: {output_srt}")
+                
+            except Exception as retry_e:
+                print(f"❌ whisper.cpp转录失败（重试后）: {retry_e}")
+                raise Exception(f"whisper.cpp转录失败: {retry_e}")
+        else:
+            print(f"❌ whisper.cpp转录失败: {e}")
+            raise
 
 
 
@@ -1145,7 +1495,7 @@ def is_video_file(file_path: Path) -> bool:
     return file_path.suffix.lower() in video_extensions
 
 
-def transcript(input_file: Path, output_dir: Path = None, dry_run=False, enable_diarization=True):
+def transcript(input_file: Path, output_dir: Path = None, dry_run=False, enable_diarization=False, force_whisperx=False):
     """
     将视频或音频文件转换为字幕文件，自动生成两个版本：
     1. SRT文件（不带对话人标识）
@@ -1156,6 +1506,7 @@ def transcript(input_file: Path, output_dir: Path = None, dry_run=False, enable_
         output_dir: 输出目录，如果为None则将srt文件保存到项目根目录
         dry_run: 是否为试运行模式
         enable_diarization: 是否启用说话人分离功能（默认为True）
+        force_whisperx: 是否强制使用whisperx而不是whisper.cpp（默认为False）
     """
     input_file = Path(input_file)
 
@@ -1224,30 +1575,83 @@ def transcript(input_file: Path, output_dir: Path = None, dry_run=False, enable_
     print(f"📝 从{file_type}创建16kHz单声道音频用于转录: {transcription_wav.name}")
     ensure_16khz_mono_wav(media_file, transcription_wav, force_convert=True)
 
+    # VAD预处理：移除静音片段
+    vad_processed_wav = media_file.parent / f"{media_file.stem}_vad_processed.wav"
+    print("🎯 开始VAD预处理，移除静音片段...")
+    vad_success = preprocess_audio_with_vad(
+        input_audio=transcription_wav,
+        output_audio=vad_processed_wav,
+        min_speech_duration_ms=250,  # 最小语音片段250ms
+        min_silence_duration_ms=100   # 最小静音片段100ms
+    )
+    
+    # 如果VAD预处理成功，使用处理后的音频进行转录
+    if vad_success and vad_processed_wav.exists():
+        final_transcription_wav = vad_processed_wav
+        print(f"✅ VAD预处理完成，使用处理后的音频: {final_transcription_wav.name}")
+    else:
+        final_transcription_wav = transcription_wav
+        print(f"⚠️ VAD预处理失败或跳过，使用原始音频: {final_transcription_wav.name}")
+
     # 生成字幕到临时位置
     print("生成字幕...")
 
     # 检查whisper.cpp是否可用，如果不可用则使用whisperx
-    whisper_cpp_available = cpp_path.exists() and cpp_model.exists()
+    whisper_cpp_available = cpp_path.exists() and cpp_model.exists() and not force_whisperx
+    
+    if force_whisperx:
+        print("🔧 强制使用whisperx引擎")
 
-    if enable_diarization:
-        # 说话人分离必须使用whisperx，不使用whisper.cpp
-        print("🎭 说话人分离功能需要使用whisperx...")
-        transcriptx_with_diarization(transcription_wav, temp_srt, prompt)
-    elif whisper_cpp_available and not dry_run:
-        # 使用whisper.cpp进行纯转录（无说话人分离）
+    if whisper_cpp_available and not dry_run:
+        # 优先使用whisper.cpp进行转录（支持说话人分离）
         try:
             print("🚀 使用whisper.cpp进行转录...")
-            transcript_cpp(transcription_wav, temp_srt, prompt, dry_run)
+            transcript_cpp(final_transcription_wav, temp_srt, prompt, dry_run, enable_diarization, enable_vad=True)
+            
+            # 检查whisper.cpp是否成功生成了有效的字幕文件
+            if temp_srt.exists():
+                # 检查文件内容是否有效
+                try:
+                    subs = pysubs2.load(str(temp_srt))
+                    if len(subs.events) > 0:
+                        print(f"✅ whisper.cpp转录成功，生成了 {len(subs.events)} 个字幕段落")
+                        whisper_cpp_success = True
+                    else:
+                        print("⚠️ whisper.cpp生成的字幕文件为空")
+                        whisper_cpp_success = False
+                except Exception as parse_error:
+                    print(f"⚠️ whisper.cpp生成的字幕文件格式有误: {parse_error}")
+                    whisper_cpp_success = False
+            else:
+                print("⚠️ whisper.cpp未生成字幕文件")
+                whisper_cpp_success = False
+                
+            # 如果whisper.cpp失败，回退到whisperx
+            if not whisper_cpp_success:
+                print("回退到whisperx转录...")
+                if enable_diarization:
+                    transcriptx_with_diarization(final_transcription_wav, temp_srt, prompt)
+                else:
+                    transcriptx(final_transcription_wav, temp_srt, prompt)
+                    
         except Exception as e:
             print(f"⚠️ whisper.cpp转录失败: {e}")
             print("回退到whisperx转录...")
-            transcriptx(transcription_wav, temp_srt, prompt)
+            if enable_diarization:
+                transcriptx_with_diarization(final_transcription_wav, temp_srt, prompt)
+            else:
+                transcriptx(final_transcription_wav, temp_srt, prompt)
     else:
-        # 使用whisperx进行转录
+        # whisper.cpp不可用或为试运行模式，使用whisperx
         if not whisper_cpp_available:
             print("⚠️ whisper.cpp不可用，使用whisperx转录...")
-        transcriptx(transcription_wav, temp_srt, prompt)
+        if dry_run:
+            print("🔧 试运行模式，使用whisperx...")
+            
+        if enable_diarization:
+            transcriptx_with_diarization(final_transcription_wav, temp_srt, prompt)
+        else:
+            transcriptx(final_transcription_wav, temp_srt, prompt)
 
     # 检查字幕文件是否生成成功
     if not temp_srt.exists():

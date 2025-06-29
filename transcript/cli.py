@@ -48,7 +48,9 @@ def create_parser():
         epilog="""
 示例:
   transcript auto video.mp4                  # 自动处理（无需手动编辑）
-  transcript gen video.mp4                   # 生成字幕
+  transcript gen video.mp4                   # 生成字幕（优先使用whisper.cpp）
+  transcript gen video.mp4 --force-whisperx  # 强制使用whisperx引擎
+  transcript gen video.mp4 --enable-diarization  # 启用说话人分离功能
   transcript resume                          # 编辑字幕后继续处理
   transcript status                          # 查看状态
         """
@@ -73,6 +75,10 @@ def create_parser():
     )
     gen_parser.add_argument('video', help='输入视频或音频文件路径')
     gen_parser.add_argument('-o', '--output', help='输出目录（默认：项目根目录）')
+    gen_parser.add_argument('--force-whisperx', action='store_true', 
+                           help='强制使用whisperx而不是whisper.cpp')
+    gen_parser.add_argument('--enable-diarization', action='store_true',
+                           help='启用说话人分离功能（默认禁用，需要tinydiarize模型）')
 
     # 3. resume - 编辑字幕后继续处理
     resume_parser = subparsers.add_parser(
@@ -192,18 +198,36 @@ def cmd_gen(args):
 
         print_banner()
         print_info(f"开始生成转录文件: {args.video}")
-        print_info("🎭 自动启用说话人分离功能")
+        
+        # 根据参数决定是否启用说话人分离
+        enable_diarization = args.enable_diarization
+        if enable_diarization:
+            print_info("🎭 启用说话人分离功能")
+        else:
+            print_info("📝 禁用说话人分离功能")
+            
+        # 根据参数决定是否强制使用whisperx
+        if args.force_whisperx:
+            print_info("🔧 强制使用whisperx引擎")
 
         video = validate_video_file(args.video)
         output_dir = Path(args.output) if args.output else None
 
         # 现在transcript函数返回两个文件
-        srt_file, speaker_txt = transcript(video, output_dir, enable_diarization=True)
+        srt_file, speaker_txt = transcript(
+            video, 
+            output_dir, 
+            enable_diarization=enable_diarization,
+            force_whisperx=args.force_whisperx
+        )
 
         print_success(f"转录文件生成完成!")
         print_info(f"SRT字幕文件（无说话人标识）: {srt_file}")
-        print_info(f"文本文件（含说话人标识）: {speaker_txt}")
-        print_info("✨ 已自动生成两个版本的转录文件")
+        if speaker_txt:
+            print_info(f"文本文件（含说话人标识）: {speaker_txt}")
+            print_info("✨ 已自动生成两个版本的转录文件")
+        else:
+            print_info("📝 已生成SRT字幕文件")
         print_info("下一步: 编辑SRT字幕文件，然后运行 'transcript resume' 继续处理")
 
     except Exception as e:

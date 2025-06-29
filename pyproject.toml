@@ -1,24 +1,24 @@
-[project]
+[tool.poetry]
 name = "transcript"
 version = "0.1.0"
 description = "视频字幕处理工具 - 自动生成、编辑和处理视频字幕"
-authors = [
-    {name = "Flora-cj",email = "1625864556@qq.com"}
-]
+authors = ["Flora-cj <1625864556@qq.com>"]
 readme = "README.md"
-requires-python = ">=3.10,<3.13"
-dependencies = [
-    "jieba (>=0.42.1,<0.43.0)",
-    "opencc (>=1.1.9,<2.0.0)",
-    "pysubs2 (>=1.8.0,<2.0.0)",
-    "pyyaml (>=6.0,<7.0)",
-    "whisperx (>=3.3.4,<4.0.0)",
-    "torch (>=2.0.0)",
-    "torchvision (>=0.15.0)",
-    "torchaudio (>=2.0.0)"
-]
+packages = [{include = "transcript"}]
 
-[project.scripts]
+[tool.poetry.dependencies]
+python = ">=3.10,<3.13"
+jieba = ">=0.42.1,<0.43.0"
+opencc = ">=1.1.9,<2.0.0"
+pysubs2 = ">=1.8.0,<2.0.0"
+pyyaml = ">=6.0,<7.0"
+whisperx = ">=3.3.4,<4.0.0"
+torch = ">=2.0.0"
+torchvision = ">=0.15.0"
+torchaudio = ">=2.0.0"
+silero-vad = "^5.1.2"
+
+[tool.poetry.scripts]
 transcript = "transcript.cli:main"
 
 [[tool.poetry.source]]

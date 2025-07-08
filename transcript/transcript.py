@@ -150,7 +150,7 @@ hf_home = os.environ.get("HF_HOME", "/Volumes/share/data/models/huggingface")
 model_dir = os.path.join(hf_home, "hub")
 
 # 设置whisperx模型名称
-whisperx_model = "large-v2"  # 支持中文的whisper模型
+whisperx_model = "base"  # 支持中文的whisper模型，使用已有的base模型
 w2v_model = "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn"  # 中文对齐模型
 
 def preprocess_audio_with_vad(input_audio: Path, output_audio: Path, min_speech_duration_ms: int = 250, min_silence_duration_ms: int = 100):
@@ -208,10 +208,24 @@ def preprocess_audio_with_vad(input_audio: Path, output_audio: Path, min_speech_
         if speech_segments:
             processed_audio = torch.cat(speech_segments, dim=0)
             
-            # 保存处理后的音频
+            # 保存处理后的音频（确保16位PCM格式，兼容whisper.cpp）
             print(f"💾 保存VAD处理后的音频: {output_audio}")
             import torchaudio
-            torchaudio.save(str(output_audio), processed_audio.unsqueeze(0), 16000)
+            
+            # 将音频数据转换为16位整数格式
+            # 首先确保数据在[-1, 1]范围内
+            processed_audio = torch.clamp(processed_audio, -1.0, 1.0)
+            # 转换为16位整数
+            processed_audio_int16 = (processed_audio * 32767).to(torch.int16)
+            
+            # 保存为16位PCM WAV格式
+            torchaudio.save(
+                str(output_audio), 
+                processed_audio_int16.unsqueeze(0).float() / 32767.0,  # 转回浮点但保持16位精度
+                16000,
+                encoding="PCM_S",  # 16位有符号PCM
+                bits_per_sample=16
+            )
             
             # 计算压缩比例
             original_duration = len(wav) / 16000

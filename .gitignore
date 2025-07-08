@@ -13,3 +13,4 @@ env/
 # 临时文件
 *_transcription.wav
 *_alignment.wav
+/tmp/*

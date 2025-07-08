@@ -48,7 +48,8 @@ def create_parser():
         epilog="""
 示例:
   transcript auto video.mp4                  # 自动处理（无需手动编辑）
-  transcript gen video.mp4                   # 生成字幕（优先使用whisper.cpp）
+  transcript gen video.mp4                   # 快速转录（优先使用whisper.cpp）
+  transcript gen video.mp4 --speakers        # 说话人分离转录（使用whisperx）
   transcript gen video.mp4 --force-whisperx  # 强制使用whisperx引擎
   transcript gen video.mp4 --enable-diarization  # 启用说话人分离功能
   transcript resume                          # 编辑字幕后继续处理
@@ -79,6 +80,8 @@ def create_parser():
                            help='强制使用whisperx而不是whisper.cpp')
     gen_parser.add_argument('--enable-diarization', action='store_true',
                            help='启用说话人分离功能（默认禁用，需要tinydiarize模型）')
+    gen_parser.add_argument('--speakers', action='store_true',
+                           help='启用说话人分离并强制使用whisperx（快速转录时不使用此参数）')
 
     # 3. resume - 编辑字幕后继续处理
     resume_parser = subparsers.add_parser(
@@ -199,16 +202,27 @@ def cmd_gen(args):
         print_banner()
         print_info(f"开始生成转录文件: {args.video}")
         
-        # 根据参数决定是否启用说话人分离
-        enable_diarization = args.enable_diarization
-        if enable_diarization:
-            print_info("🎭 启用说话人分离功能")
+        # 处理--speakers参数：启用说话人分离并强制使用whisperx
+        if hasattr(args, 'speakers') and args.speakers:
+            enable_diarization = True
+            force_whisperx = True
+            print_info("🎭 启用说话人分离功能（--speakers）")
+            print_info("🔧 强制使用whisperx引擎（说话人分离模式）")
         else:
-            print_info("📝 禁用说话人分离功能")
+            # 根据参数决定是否启用说话人分离
+            enable_diarization = args.enable_diarization
+            force_whisperx = args.force_whisperx
             
-        # 根据参数决定是否强制使用whisperx
-        if args.force_whisperx:
-            print_info("🔧 强制使用whisperx引擎")
+            if enable_diarization:
+                print_info("🎭 启用说话人分离功能")
+            else:
+                print_info("📝 禁用说话人分离功能（快速转录模式）")
+                
+            # 根据参数决定是否强制使用whisperx
+            if force_whisperx:
+                print_info("🔧 强制使用whisperx引擎")
+            else:
+                print_info("🚀 优先使用whisper.cpp引擎（快速转录）")
 
         video = validate_video_file(args.video)
         output_dir = Path(args.output) if args.output else None
@@ -218,7 +232,7 @@ def cmd_gen(args):
             video, 
             output_dir, 
             enable_diarization=enable_diarization,
-            force_whisperx=args.force_whisperx
+            force_whisperx=force_whisperx
         )
 
         print_success(f"转录文件生成完成!")

@@ -14,3 +14,4 @@ env/
 *_transcription.wav
 *_alignment.wav
 /tmp/*
+*.md

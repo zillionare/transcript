@@ -15,4 +15,5 @@ env/
 *_alignment.wav
 /tmp/*
 *.md
+*.pdf
 .DS_Store

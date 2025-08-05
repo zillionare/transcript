@@ -16,7 +16,6 @@ whisperx = ">=3.3.4,<4.0.0"
 torch = ">=2.0.0"
 torchvision = ">=0.15.0"
 torchaudio = ">=2.0.0"
-silero-vad = "^5.1.2"
 
 [tool.poetry.scripts]
 transcript = "transcript.cli:main"

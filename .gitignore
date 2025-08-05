@@ -17,3 +17,5 @@ env/
 *.md
 *.pdf
 .DS_Store
+*.html
+

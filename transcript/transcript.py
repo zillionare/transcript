@@ -41,9 +41,9 @@ import pysubs2
 
 warnings.filterwarnings("ignore")
 
-import whisperx
-from silero_vad import load_silero_vad, read_audio, get_speech_timestamps
 import torch
+import whisperx
+from silero_vad import get_speech_timestamps, load_silero_vad, read_audio
 
 # Import the timestamp alignment function
 from .timestamp_alignment import adjust_srt_timestamps_advanced
@@ -214,7 +214,7 @@ def preprocess_audio_with_vad(input_audio: Path, output_audio: Path, min_speech_
             # 保存处理后的音频（确保16位PCM格式，兼容whisper.cpp）
             print(f"💾 保存VAD处理后的音频: {output_audio}")
             import torchaudio
-            
+
             # 将音频数据转换为16位整数格式
             # 首先确保数据在[-1, 1]范围内
             processed_audio = torch.clamp(processed_audio, -1.0, 1.0)
@@ -1353,9 +1353,9 @@ def speechbrain_speaker_diarization(segments, audio, audio_file_path):
     print("🎭 使用SpeechBrain进行说话人分离...")
 
     try:
-        from speechbrain.inference import SpeakerRecognition
-        import torch
         import numpy as np
+        import torch
+        from speechbrain.inference import SpeakerRecognition
 
         # 首先过滤prompt泄露和无效内容
         print("🧹 过滤prompt泄露和无效内容...")
@@ -1607,23 +1607,10 @@ def transcript(input_file: Path, output_dir: Path = None, dry_run=False, enable_
     print(f"📝 从{file_type}创建16kHz单声道音频用于转录: {transcription_wav.name}")
     ensure_16khz_mono_wav(media_file, transcription_wav, force_convert=True)
 
-    # VAD预处理：移除静音片段
-    vad_processed_wav = media_file.parent / f"{media_file.stem}_vad_processed.wav"
-    print("🎯 开始VAD预处理，移除静音片段...")
-    vad_success = preprocess_audio_with_vad(
-        input_audio=transcription_wav,
-        output_audio=vad_processed_wav,
-        min_speech_duration_ms=250,  # 最小语音片段250ms
-        min_silence_duration_ms=100   # 最小静音片段100ms
-    )
-    
-    # 如果VAD预处理成功，使用处理后的音频进行转录
-    if vad_success and vad_processed_wav.exists():
-        final_transcription_wav = vad_processed_wav
-        print(f"✅ VAD预处理完成，使用处理后的音频: {final_transcription_wav.name}")
-    else:
-        final_transcription_wav = transcription_wav
-        print(f"⚠️ VAD预处理失败或跳过，使用原始音频: {final_transcription_wav.name}")
+    # 禁用VAD预处理以避免字幕时间漂移
+    print("⚠️ VAD预处理已禁用（避免字幕时间漂移）")
+    final_transcription_wav = transcription_wav
+    print(f"✅ 使用原始音频进行转录: {final_transcription_wav.name}")
 
     # 生成字幕到临时位置
     print("生成字幕...")
@@ -1638,7 +1625,7 @@ def transcript(input_file: Path, output_dir: Path = None, dry_run=False, enable_
         # 优先使用whisper.cpp进行转录（支持说话人分离）
         try:
             print("🚀 使用whisper.cpp进行转录...")
-            transcript_cpp(final_transcription_wav, temp_srt, prompt, dry_run, enable_diarization, enable_vad=True)
+            transcript_cpp(final_transcription_wav, temp_srt, prompt, dry_run, enable_diarization, enable_vad=False)
             
             # 检查whisper.cpp是否成功生成了有效的字幕文件
             if temp_srt.exists():

@@ -45,6 +45,9 @@ import whisperx
 from silero_vad import load_silero_vad, read_audio, get_speech_timestamps
 import torch
 
+# Import the timestamp alignment function
+from .timestamp_alignment import adjust_srt_timestamps_advanced
+
 
 def detect_optimal_device_config():
     """检测并配置最优的设备和计算类型（专为M1/M4优化）"""
@@ -236,6 +239,21 @@ def preprocess_audio_with_vad(input_audio: Path, output_audio: Path, min_speech_
             print(f"   原始时长: {original_duration:.2f}秒")
             print(f"   处理后时长: {processed_duration:.2f}秒")
             print(f"   压缩比例: {compression_ratio:.1f}%")
+            
+            # 保存时间戳信息用于后续时间对齐
+            timestamp_file = output_audio.with_suffix('.timestamps.json')
+            timestamp_info = {
+                'original_duration': original_duration,
+                'processed_duration': processed_duration,
+                'speech_segments': speech_timestamps,
+                'sampling_rate': 16000
+            }
+            
+            import json
+            with open(timestamp_file, 'w', encoding='utf-8') as f:
+                json.dump(timestamp_info, f, ensure_ascii=False, indent=2)
+            
+            print(f"💾 保存时间戳信息: {timestamp_file}")
             
             return True
         else:
@@ -1672,6 +1690,26 @@ def transcript(input_file: Path, output_dir: Path = None, dry_run=False, enable_
         raise FileNotFoundError(f"字幕生成失败，文件不存在: {temp_srt}")
 
     print(f"✅ 字幕文件生成成功: {temp_srt}")
+    
+    # 如果使用了VAD预处理，需要对时间戳进行对齐
+    if final_transcription_wav == vad_processed_wav:
+        timestamp_info_file = vad_processed_wav.with_suffix('.timestamps.json')
+        if timestamp_info_file.exists():
+            print("🔍 检测到VAD预处理，正在进行时间戳对齐...")
+            try:
+                from .timestamp_alignment import adjust_srt_timestamps_advanced
+                aligned_srt = temp_srt.with_name(f"{temp_srt.stem}_aligned.srt")
+                success = adjust_srt_timestamps_advanced(temp_srt, timestamp_info_file, aligned_srt)
+                if success and aligned_srt.exists():
+                    # 替换原始字幕文件
+                    temp_srt.unlink()
+                    aligned_srt.rename(temp_srt)
+                    print("✅ 时间戳对齐完成")
+                else:
+                    print("⚠️ 时间戳对齐失败，使用原始时间戳")
+            except Exception as e:
+                print(f"⚠️ 时间戳对齐过程出错: {e}")
+                print("使用原始时间戳继续处理...")
 
     # 应用自定义词典纠错
     print("应用词典纠错...")

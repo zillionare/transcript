@@ -15,8 +15,15 @@ from typing import Optional
 def setup_huggingface_env():
     """设置Hugging Face环境变量"""
     # 设置HF_HOME（缓存目录）
-    if 'HF_HOME' not in os.environ:
+    # 优先使用环境变量，但如果指向原来的共享目录，则改用本地目录
+    env_hf_home = os.environ.get('HF_HOME')
+    if env_hf_home and not env_hf_home.startswith("/Volumes/share/data"):
+        # 如果环境变量已设置且不是原来的共享目录，则使用环境变量
+        default_hf_home = Path(env_hf_home)
+    else:
+        # 否则使用本地目录
         default_hf_home = Path.home() / ".cache" / "huggingface"
+        # 更新环境变量
         os.environ['HF_HOME'] = str(default_hf_home)
 
     # 设置HF_ENDPOINT（镜像端点）

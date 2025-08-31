@@ -143,13 +143,26 @@ if optimal_device == "mps":
 # 使用更不容易被误识别的prompt
 prompt = "以下是中文音频转录："
 
+# 修改路径配置，使用本地目录而不是共享目录
+# 片头片尾视频路径保持不变，但如果文件不存在会自动跳过
 opening_video = Path("/Volumes/share/data/autobackup/ke/factor-ml/opening.mp4")
 ending_video = Path("/Volumes/share/data/autobackup/ke/factor-ml/end.mp4")
 
-cpp_path = Path("/Volumes/share/data/whisper.cpp")
-cpp_model = Path("/Volumes/share/data/whisper.cpp/models/ggml-large-v2.bin")
-# 使用HF_HOME环境变量设置模型缓存目录
-hf_home = os.environ.get("HF_HOME", "/Volumes/share/data/models/huggingface")
+# 将whisper.cpp路径改为本地workspace目录
+cpp_path = Path("~/workspace/whisper.cpp").expanduser()
+cpp_model = Path("~/workspace/whisper.cpp/models/ggml-large-v2.bin").expanduser()
+
+# 将HF_HOME设置为本地.cache目录，优先使用环境变量，但确保指向本地目录
+env_hf_home = os.environ.get("HF_HOME")
+if env_hf_home and not env_hf_home.startswith("/Volumes/share/data"):
+    # 如果环境变量已设置且不是原来的共享目录，则使用环境变量
+    hf_home = env_hf_home
+else:
+    # 否则使用本地目录
+    hf_home = os.path.expanduser("~/.cache/huggingface")
+    # 同时更新环境变量
+    os.environ["HF_HOME"] = hf_home
+
 model_dir = os.path.join(hf_home, "hub")
 
 # 设置whisperx模型名称
@@ -358,6 +371,7 @@ def align_subtitles_with_audio(video: Path, original_srt: Path, aligned_srt: Pat
         if model_name is None:
             model_name = w2v_model
             print(f"使用默认模型名称: {model_name}")
+            print("⏳ 首次使用时可能需要下载对齐模型...")
 
         try:
             # 使用HF_HOME作为缓存目录
@@ -367,6 +381,7 @@ def align_subtitles_with_audio(video: Path, original_srt: Path, aligned_srt: Pat
                 model_name=model_name,
                 model_dir=hf_home
             )
+            print("✅ 对齐模型加载成功，开始对齐...")
             print("对齐模型加载成功，开始对齐...")
         except Exception as model_error:
             print(f"模型加载失败: {model_error}")
@@ -893,6 +908,7 @@ def transcriptx(input_audio: Path, output_srt: Path, prompt: str):
 
             print(f"🔧 模型缓存目录: {download_root}")
             print(f"🔧 离线模式: {local_files_only}")
+            print("⏳ 正在加载模型，首次使用时可能需要下载模型文件...")
 
             model = whisperx.load_model(
                 whisperx_model,
@@ -904,6 +920,7 @@ def transcriptx(input_audio: Path, output_srt: Path, prompt: str):
                 download_root=download_root,
                 local_files_only=local_files_only
             )
+            print("✅ 模型加载完成")
         except Exception as model_error:
             print(f"⚠️ 加载whisperx模型失败: {model_error}")
             print("尝试使用本地模型或降级模型...")
@@ -918,7 +935,7 @@ def transcriptx(input_audio: Path, output_srt: Path, prompt: str):
                     threads=8,
                     local_files_only=False
                 )
-                print("✅ 成功加载基础模型")
+                print("✅ 基础模型加载完成")
             except Exception as fallback_error:
                 print(f"❌ 基础模型也加载失败: {fallback_error}")
                 raise model_error
